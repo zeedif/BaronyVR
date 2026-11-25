@@ -14,6 +14,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib> // STEP638FP: optional desktop-only launch environment variable.
+#include <string>
+#include <tlhelp32.h> // ZF1: detect a running SteamVR server for runtime selection.
 #include "main.hpp"
 #include "game.hpp" // intro, gamePaused, clientnum and gameplay UI state.
 #include "net.hpp" // Declares messagePlayer() used by the arm-calibration HUD.
@@ -170,6 +172,9 @@ static XrSpace g_xrGuiViewSpace = XR_NULL_HANDLE;
 // S14 extends the S5 title LOCAL-space menu anchor to in-game UI during the
 // opt-in compatibility test. The GUI laser uses the layer's exact XR space.
 static XrSpace g_xrS5IntroMenuAnchorSpace = XR_NULL_HANDLE;
+// ZF6: where the world-anchored menu was placed, for lazy re-centering.
+static float g_vrMenuAnchorYaw = 0.f, g_vrMenuAnchorX = 0.f, g_vrMenuAnchorZ = 0.f;
+static Uint32 g_vrMenuAnchorOffSince = 0;
 // S7 diagnostics are logging-only: no anchor reset, room movement or recenter changes.
 static bool vrS7RecenterDiagnosticsRequested()
 {
@@ -314,6 +319,87 @@ static std::vector<XrSwapchainImageOpenGLKHR> g_xrSwapchainImages;
 static int64_t g_xrSwapchainFormat = 35907; // GL_SRGB8_ALPHA8
 static uint32_t g_xrEyeWidth = 3760;
 static uint32_t g_xrEyeHeight = 3996;
+
+// ZF4: Headset-free debugging. With BARONYVR_DEBUG_DUMP=<seconds> (e.g. 2),
+// every interval the submitted left-eye image and the floating GUI panel are
+// written to vr_debug/ next to log.txt, plus a state line in vr_debug/state.txt.
+// Lets the VR output be inspected with SteamVR's null headset driver or by a
+// tester who reports "what I see" with files instead of descriptions.
+static float vrDebugDumpIntervalSeconds()
+{
+    static const float interval = []() {
+        const char* value = std::getenv("BARONYVR_DEBUG_DUMP");
+        const float seconds = value ? static_cast<float>(std::atof(value)) : 0.f;
+        return seconds > 0.f ? std::max(0.5f, seconds) : 0.f;
+    }();
+    return interval;
+}
+static bool g_vrDebugDumpThisFrame = false;
+static int g_vrDebugDumpIndex = 0;
+
+static void vrDebugWriteBmp(const char* path, const std::vector<unsigned char>& rgba,
+    int width, int height, int step)
+{
+    const int outW = width / step, outH = height / step;
+    if (outW <= 0 || outH <= 0) return;
+    const int rowBytes = (outW * 3 + 3) & ~3;
+    const unsigned int dataSize = static_cast<unsigned int>(rowBytes * outH);
+    unsigned char header[54] = { 'B', 'M' };
+    auto put32 = [&](int offset, unsigned int v) {
+        header[offset] = v & 0xff; header[offset + 1] = (v >> 8) & 0xff;
+        header[offset + 2] = (v >> 16) & 0xff; header[offset + 3] = (v >> 24) & 0xff; };
+    put32(2, 54 + dataSize); put32(10, 54); put32(14, 40);
+    put32(18, static_cast<unsigned int>(outW)); put32(22, static_cast<unsigned int>(outH));
+    header[26] = 1; header[28] = 24; put32(34, dataSize);
+    FILE* file = std::fopen(path, "wb");
+    if (!file) return;
+    std::fwrite(header, 1, sizeof(header), file);
+    std::vector<unsigned char> row(rowBytes, 0);
+    for (int y = 0; y < outH; ++y) // GL rows are bottom-up, like BMP.
+    {
+        for (int x = 0; x < outW; ++x)
+        {
+            const unsigned char* p = &rgba[(static_cast<size_t>(y * step) * width + x * step) * 4];
+            // Composite transparent GUI pixels over magenta so they are visible.
+            const float a = p[3] / 255.f;
+            row[x * 3 + 0] = static_cast<unsigned char>(p[2] * a + 255 * (1.f - a) * 0.6f);
+            row[x * 3 + 1] = static_cast<unsigned char>(p[1] * a);
+            row[x * 3 + 2] = static_cast<unsigned char>(p[0] * a + 255 * (1.f - a) * 0.6f);
+        }
+        std::fwrite(row.data(), 1, rowBytes, file);
+    }
+    std::fclose(file);
+}
+
+// Read the currently attached colour texture (2D texture or array layer).
+static void vrDebugDumpTexture(GLuint texture, bool arrayLayer, int width, int height,
+    const char* prefix, bool opaque)
+{
+    if (!g_vrDebugDumpThisFrame || !texture || width <= 0 || height <= 0) return;
+    CreateDirectoryA("vr_debug", nullptr);
+    GLint previousRead = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousRead);
+    GLuint fbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    if (arrayLayer)
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0, 0);
+    else
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+    {
+        std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 4);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        if (opaque) for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;
+        char path[128];
+        snprintf(path, sizeof(path), "vr_debug/%s_%03d.bmp", prefix, g_vrDebugDumpIndex);
+        vrDebugWriteBmp(path, pixels, width, height, std::max(1, width / 960));
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousRead));
+    glDeleteFramebuffers(1, &fbo);
+}
 void vrCheckSwapchainFormats();
 void vrCheckViewConfiguration();
 void vrCreateSwapchain();
@@ -523,11 +609,33 @@ static void vrBindVirtualControllerInLobby()
             // player 0 in Barony's Inputs class.
             const int inputPlayer = multiplayer == SINGLE ? clientnum : 0;
             Input::inputs[inputPlayer].refresh();
+            // ZF2: the lobby card reads Input::inputs[card owner]; for an
+            // online client that is clientnum, not 0. Refresh it as well.
+            if (inputPlayer != clientnum)
+                Input::inputs[clientnum].refresh();
             std::printf("OpenXR VR: STEP624 QUEST GAMEPAD bound to lobby player %d (device=%d)\n",
                 clientnum, static_cast<int>(instance));
             return;
         }
     }
+}
+
+// ZF2: True while the local player's lobby card still shows "press A / Space
+// to join". Barony only signs a player in on GamepadLoginA (needs a
+// controller bound to that exact slot) or KeyboardLogin (Space). The VR
+// gamepad binding raced with Barony releasing controllers whenever it
+// rebuilt the card, so A never reached the card. Use the keyboard path.
+static bool vrLocalLobbyAwaitingLogin()
+{
+    if (!vrCharacterCreationLobbyActive() || inputstr)
+        return false;
+    Frame* lobby = MainMenu::main_menu_frame->findFrame("lobby");
+    if (!lobby) return false;
+    const int localPlayer = multiplayer == SINGLE ?
+        inputs.getPlayerIDAllowedKeyboard() : clientnum;
+    if (localPlayer < 0 || localPlayer >= MAXPLAYERS) return false;
+    Frame* card = lobby->findFrame((std::string("card") + std::to_string(localPlayer)).c_str());
+    return card && card->findField("start") != nullptr;
 }
 
 
@@ -645,6 +753,8 @@ static const char* vrPlayModeName()
 // STEP638FO: Explicit desktop opt-out and independent visual flail preview.
 // Defaults retain VR auto-detection and enable the cosmetic preview.
 static bool g_vrUserEnabled = true;
+// ZF1: OpenXR runtime selection (see vrOpenXRTest). Kept in vr_settings.cfg.
+static std::string g_vrXrRuntimePreference = "auto";
 static bool g_vrFlailVisualEnabled = true;
 // Cosmetic-only flail pivot and chain tuning in Barony world units.
 static float g_vrFlailAnchorForward = 2.4f;
@@ -671,6 +781,15 @@ static void vrReadFeatureSettings()
             g_vrUserEnabled = false;
         else if (std::strncmp(line, "vr_enabled=1", 12) == 0)
             g_vrUserEnabled = true;
+        else if (std::strncmp(line, "xr_runtime=", 11) == 0)
+        {
+            // ZF1: auto | active | steamvr | <path to an OpenXR runtime .json>
+            std::string value(line + 11);
+            while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
+                value.back() == ' ' || value.back() == '\t'))
+                value.pop_back();
+            if (!value.empty()) g_vrXrRuntimePreference = value;
+        }
         else if (std::strncmp(line, "flail_visual=0", 14) == 0)
             g_vrFlailVisualEnabled = false;
         else if (std::strncmp(line, "flail_visual=1", 14) == 0)
@@ -708,13 +827,17 @@ static void vrSaveModeSettings()
             "vr_enabled=%d\nflail_visual=%d\n"
             "flail_anchor_forward=%.3f\nflail_anchor_up=%.3f\n"
             "flail_chain_length=%.3f\nflail_anchor_side=%.3f\n"
-            "flail_damping=%.3f\nflail_model_size=%.3f\nmode=%s\nroom_scale=%d\n",
+            "flail_damping=%.3f\nflail_model_size=%.3f\nmode=%s\nroom_scale=%d\n"
+            "# xr_runtime: auto (SteamVR when it is running, else the active runtime,\n"
+            "# falling back to the other), active, steamvr, or a runtime .json path.\n"
+            "xr_runtime=%s\n",
             g_vrUserEnabled ? 1 : 0, g_vrFlailVisualEnabled ? 1 : 0,
             g_vrFlailAnchorForward, g_vrFlailAnchorUp,
             g_vrFlailChainLength, g_vrFlailAnchorSide, g_vrFlailDamping,
             g_vrFlailModelSize,
             g_xrPlayMode == VrPlayMode::Standing ? "standing" : "seated",
-            g_vrRoomScaleEnabled ? 1 : 0);
+            g_vrRoomScaleEnabled ? 1 : 0,
+            g_vrXrRuntimePreference.c_str());
         std::fclose(file);
         g_vrFlailSettingsDirty = false;
     }
@@ -1066,6 +1189,33 @@ static void vrUpdateMenuNavigation(bool validInput = true)
         g_xrControllerActionsAttached;
     const VrControllerHandState& right = g_xrControllerHands[1];
     const Uint32 now = SDL_GetTicks();
+
+    // ZF2: A on the lobby "press to join" card sends Barony's KeyboardLogin.
+    static bool lobbyLoginWasDown = false;
+    // Test hook (BARONYVR_TEST_LOBBY_A=1): press A once per join card, for
+    // headset-free runs with SteamVR's null driver (it has no controllers).
+    static const bool testLobbyA = []() {
+        const char* v = std::getenv("BARONYVR_TEST_LOBBY_A");
+        return v && v[0] == '1';
+    }();
+    static int testLobbyAFrames = 0;
+    static Uint32 testLobbyAWaitSince = 0;
+    const bool awaitingLogin = vrLocalLobbyAwaitingLogin();
+    if (testLobbyA && awaitingLogin && !testLobbyAFrames && !lobbyLoginWasDown)
+    {
+        if (!testLobbyAWaitSince) testLobbyAWaitSince = now;
+        else if (now - testLobbyAWaitSince > 3000) { testLobbyAFrames = 12; testLobbyAWaitSince = 0; }
+    }
+    const bool primaryPressed = right.primaryButton || testLobbyAFrames > 0;
+    if (testLobbyAFrames > 0) --testLobbyAFrames;
+    const bool lobbyLoginDown = menuPresent && primaryPressed &&
+        (lobbyLoginWasDown || awaitingLogin);
+    if (lobbyLoginDown != lobbyLoginWasDown)
+    {
+        vrSendMenuKey(SDLK_SPACE, lobbyLoginDown);
+        lobbyLoginWasDown = lobbyLoginDown;
+        printlog("[VR ZF2] lobby join key %s", lobbyLoginDown ? "DOWN" : "UP");
+    }
 
     if (!menuPresent)
     {
@@ -3846,8 +3996,14 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
                 SDL_CONTROLLER_AXIS_LEFTY, dpadMode ? 0 : stickAxis(left.thumbstick.y, true));
             for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX; ++i)
                 SDL_JoystickSetVirtualButton(g_xrVirtualSDLJoystick, i, SDL_RELEASED);
+            // ZF2: while the join card waits, A is delivered as Space by
+            // vrUpdateMenuNavigation; do not also confirm the next widget.
+            static bool lobbyAHeldFromLogin = false;
+            if (vrLocalLobbyAwaitingLogin()) lobbyAHeldFromLogin = right.primaryButton;
+            else if (!right.primaryButton) lobbyAHeldFromLogin = false;
             SDL_JoystickSetVirtualButton(g_xrVirtualSDLJoystick,
-                SDL_CONTROLLER_BUTTON_A, right.primaryButton ? SDL_PRESSED : SDL_RELEASED);
+                SDL_CONTROLLER_BUTTON_A,
+                (right.primaryButton && !lobbyAHeldFromLogin) ? SDL_PRESSED : SDL_RELEASED);
             applyDpad();
             SDL_JoystickUpdate();
             return;
@@ -4549,7 +4705,7 @@ void vrTestOpenGLHandles()
 }
 
 
-bool vrOpenXRTest()
+static bool vrOpenXRTestOnce()
 {
     // Safe desktop fallback even when the OpenXR runtime is installed:
     // never create an XR instance when the user disables VR. If no headset
@@ -5263,6 +5419,163 @@ bool vrOpenXRTest()
     std::printf("OpenXR: runtime instance retained for VR session creation.\n");
     return true;
 }
+
+// ZF1: OpenXR runtime selection.
+// The loader always uses the system "active runtime" (HKLM\SOFTWARE\Khronos\
+// OpenXR\1\ActiveRuntime) unless XR_RUNTIME_JSON is set. With Meta Horizon
+// registered as active, starting Barony VR from SteamVR (Steam Link, Virtual
+// Desktop/SteamVR, Index, ...) used the Meta runtime, found no headset and
+// silently fell back to desktop. Pick SteamVR when its server is running and
+// fall back to the other runtime when headset detection fails.
+static bool vrIsProcessRunning(const wchar_t* exeName)
+{
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool found = false;
+    if (Process32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (_wcsicmp(entry.szExeFile, exeName) == 0) { found = true; break; }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+static bool vrFileExists(const std::string& path)
+{
+    const DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// SteamVR records its install folder in %LOCALAPPDATA%\openvr\openvrpaths.vrpath
+// ({"runtime" : ["C:\\...\\SteamVR"], ...}). Its OpenXR manifest sits there.
+static std::string vrFindSteamVrRuntimeManifest()
+{
+    std::vector<std::string> folders;
+    if (const char* localAppData = std::getenv("LOCALAPPDATA"))
+    {
+        const std::string vrpath = std::string(localAppData) + "\\openvr\\openvrpaths.vrpath";
+        if (FILE* file = std::fopen(vrpath.c_str(), "rb"))
+        {
+            std::string text;
+            char buffer[1024];
+            size_t read = 0;
+            while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0)
+                text.append(buffer, read);
+            std::fclose(file);
+            const size_t key = text.find("\"runtime\"");
+            const size_t open = key == std::string::npos ? key : text.find('[', key);
+            const size_t close = open == std::string::npos ? open : text.find(']', open);
+            size_t pos = open;
+            while (pos != std::string::npos && pos < close)
+            {
+                const size_t start = text.find('"', pos + 1);
+                if (start == std::string::npos || start > close) break;
+                const size_t end = text.find('"', start + 1);
+                if (end == std::string::npos || end > close) break;
+                std::string folder;
+                for (size_t i = start + 1; i < end; ++i)
+                {
+                    if (text[i] == '\\' && i + 1 < end && text[i + 1] == '\\') ++i;
+                    folder.push_back(text[i]);
+                }
+                if (!folder.empty()) folders.push_back(folder);
+                pos = end;
+            }
+        }
+    }
+    folders.push_back("C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR");
+    for (const std::string& folder : folders)
+    {
+        const std::string manifest = folder + "\\steamxr_win64.json";
+        if (vrFileExists(manifest)) return manifest;
+    }
+    return std::string();
+}
+
+static void vrSetXrRuntimeOverride(const std::string& manifest)
+{
+    // The OpenXR loader reads XR_RUNTIME_JSON through the Win32 environment.
+    SetEnvironmentVariableA("XR_RUNTIME_JSON", manifest.empty() ? nullptr : manifest.c_str());
+    _putenv_s("XR_RUNTIME_JSON", manifest.c_str()); // empty value removes it
+}
+
+bool vrOpenXRTest()
+{
+    vrReadFeatureSettings();
+    if (g_xrInstance != XR_NULL_HANDLE || !g_vrUserEnabled)
+        return vrOpenXRTestOnce();
+    if (const char* desktopOnly = std::getenv("BARONY_VR_DESKTOP"))
+        if (std::strcmp(desktopOnly, "1") == 0)
+            return vrOpenXRTestOnce();
+
+    // An explicit loader override from the user always wins.
+    if (const char* explicitRuntime = std::getenv("XR_RUNTIME_JSON"))
+    {
+        if (explicitRuntime[0])
+        {
+            printlog("[VR ZF1] XR_RUNTIME_JSON=%s (explicit); runtime selection skipped.", explicitRuntime);
+            return vrOpenXRTestOnce();
+        }
+    }
+
+    std::string preference = g_vrXrRuntimePreference;
+    if (const char* envPreference = std::getenv("BARONYVR_XR_RUNTIME"))
+        if (envPreference[0]) preference = envPreference;
+
+    const std::string steamVr = vrFindSteamVrRuntimeManifest();
+    const bool steamVrRunning = vrIsProcessRunning(L"vrserver.exe");
+    struct Candidate { const char* label; std::string manifest; };
+    std::vector<Candidate> candidates;
+    if (_stricmp(preference.c_str(), "active") == 0)
+    {
+        candidates.push_back({ "active", std::string() });
+    }
+    else if (_stricmp(preference.c_str(), "steamvr") == 0)
+    {
+        if (!steamVr.empty()) candidates.push_back({ "steamvr", steamVr });
+        else candidates.push_back({ "active", std::string() });
+    }
+    else if (_stricmp(preference.c_str(), "auto") != 0)
+    {
+        candidates.push_back({ "custom", preference });
+    }
+    else if (steamVrRunning && !steamVr.empty())
+    {
+        candidates.push_back({ "steamvr", steamVr });
+        candidates.push_back({ "active", std::string() });
+    }
+    else
+    {
+        candidates.push_back({ "active", std::string() });
+        if (!steamVr.empty()) candidates.push_back({ "steamvr", steamVr });
+    }
+
+    printlog("[VR ZF1] runtime preference=%s steamvrRunning=%d steamvrManifest=%s",
+        preference.c_str(), steamVrRunning ? 1 : 0,
+        steamVr.empty() ? "(not found)" : steamVr.c_str());
+    for (const Candidate& candidate : candidates)
+    {
+        vrSetXrRuntimeOverride(candidate.manifest);
+        printlog("[VR ZF1] trying OpenXR runtime: %s %s", candidate.label,
+            candidate.manifest.empty() ? "(system active runtime)" : candidate.manifest.c_str());
+        if (vrOpenXRTestOnce())
+        {
+            printlog("[VR ZF1] OpenXR headset found with runtime: %s", candidate.label);
+            return true;
+        }
+        printlog("[VR ZF1] no headset with runtime: %s", candidate.label);
+    }
+    vrSetXrRuntimeOverride(std::string());
+    printlog("[VR ZF1] no OpenXR runtime reported a headset; starting in desktop mode.");
+    return false;
+}
+
 void vrPollOpenXREvents()
 {
     if (g_xrInstance == XR_NULL_HANDLE)
@@ -5804,6 +6117,48 @@ static void vrS5UpdateIntroMenuAnchor(XrTime predictedDisplayTime)
         vrS5ClearIntroMenuAnchor();
         return;
     }
+    // ZF6: Lazy follow (Vivecraft / SteamVR dashboard style). The world anchor
+    // was captured once, on the first tracked frame - usually while the
+    // player still faced the monitor or the headset lay on the desk - and
+    // then kept for the whole title/main menu. Players then saw only the 3D
+    // backdrop. If the panel stays far from where the player looks (or they
+    // walked away from it), place it in front of them again. Never move it
+    // while a trigger is held, so pointer clicks/drags are not disturbed.
+    if (g_xrS5IntroMenuAnchorSpace != XR_NULL_HANDLE)
+    {
+        XrSpaceLocation now{ XR_TYPE_SPACE_LOCATION };
+        if (XR_SUCCEEDED(xrLocateSpace(g_xrGuiViewSpace, g_xrReferenceSpace,
+                predictedDisplayTime, &now)) &&
+            (now.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+        {
+            const XrQuaternionf& q = now.pose.orientation;
+            const float fx = -2.0f * (q.x * q.z + q.w * q.y);
+            const float fz = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+            float delta = 0.f;
+            if (fx * fx + fz * fz > 0.04f) // ignore looking straight up/down
+            {
+                delta = atan2f(-fx, -fz) - g_vrMenuAnchorYaw;
+                while (delta > 3.14159265f) delta -= 6.2831853f;
+                while (delta < -3.14159265f) delta += 6.2831853f;
+            }
+            const float dx = now.pose.position.x - g_vrMenuAnchorX;
+            const float dz = now.pose.position.z - g_vrMenuAnchorZ;
+            const bool away = std::fabs(delta) > 0.87f || dx * dx + dz * dz > 1.0f;
+            const bool pointerBusy = g_xrControllerHands[0].trigger > 0.5f ||
+                g_xrControllerHands[1].trigger > 0.5f;
+            const Uint32 ticksNow = SDL_GetTicks();
+            if (!away || pointerBusy)
+                g_vrMenuAnchorOffSince = 0;
+            else if (!g_vrMenuAnchorOffSince)
+                g_vrMenuAnchorOffSince = ticksNow ? ticksNow : 1;
+            else if (ticksNow - g_vrMenuAnchorOffSince > 650)
+            {
+                printlog("[VR ZF6] menu out of view (%.0f deg); re-placing it in front",
+                    static_cast<double>(delta * 57.2958f));
+                vrS5ClearIntroMenuAnchor(); // rebuilt below on this frame
+            }
+        }
+    }
     if (g_xrS5IntroMenuAnchorSpace == XR_NULL_HANDLE)
     {
         XrSpaceLocation head{ XR_TYPE_SPACE_LOCATION };
@@ -5853,6 +6208,13 @@ static void vrS5UpdateIntroMenuAnchor(XrTime predictedDisplayTime)
             return;
         }
         g_xrS5IntroMenuAnchorSpace = anchor;
+        g_vrMenuAnchorYaw = menuYaw;
+        g_vrMenuAnchorX = head.pose.position.x;
+        g_vrMenuAnchorZ = head.pose.position.z;
+        g_vrMenuAnchorOffSince = 0;
+        printlog("[VR ZF6] %s menu placed in front of the headset (yaw %.0f deg)",
+            calibrationUi ? "calibration" : (intro ? "title" : "in-game"),
+            static_cast<double>(menuYaw * 57.2958f));
         SDL_Log("OpenXR S15: %s menu anchored in LOCAL space; controller ray aligned.",
             calibrationUi ? "VR calibration" : (intro ? "title" : "in-game"));
         if (vrS7RecenterDiagnosticsRequested())
@@ -5892,6 +6254,17 @@ void vrProcessOpenXRFrame(view_t* camera)
         );
         return;
     }
+    // ZF4: schedule a debug capture for this frame.
+    if (const float interval = vrDebugDumpIntervalSeconds())
+    {
+        static Uint32 nextDumpAt = 0;
+        const Uint32 now = SDL_GetTicks();
+        if (static_cast<Sint32>(now - nextDumpAt) >= 0)
+        {
+            g_vrDebugDumpThisFrame = true;
+            nextDumpAt = now + static_cast<Uint32>(interval * 1000.f);
+        }
+    }
     XrFrameWaitInfo waitInfo{};
     waitInfo.type = XR_TYPE_FRAME_WAIT_INFO;
 
@@ -5925,7 +6298,15 @@ void vrProcessOpenXRFrame(view_t* camera)
     // Preserve frame timing for deferred OpenXR submission.
     g_xrFramePending = true;
     g_xrPendingDisplayTime = frameState.predictedDisplayTime;
-    g_xrPendingShouldRender = (frameState.shouldRender == XR_TRUE);
+    // ZF5: SteamVR keeps a new session in SYNCHRONIZED (shouldRender=false)
+    // until the app actually submits composition layers, while this code
+    // only submitted layers when shouldRender was true: the headset stayed
+    // black / the session never reached VISIBLE or FOCUSED. Meta's runtime
+    // advances anyway, which is why only Horizon Link worked. Keep
+    // rendering and submitting while SYNCHRONIZED; OpenXR allows layers
+    // there and simply does not display them yet.
+    g_xrPendingShouldRender = (frameState.shouldRender == XR_TRUE) ||
+        g_xrSessionState == XR_SESSION_STATE_SYNCHRONIZED;
     // Apply the same physical quad dimensions to rendering and all GUI rays.
     vrApplyMenuVisualComfort();
     // S8: synchronize a native system recenter on its exact effective frame,
@@ -6004,7 +6385,7 @@ void vrProcessOpenXRFrame(view_t* camera)
     g_xrProjectionLayer.layerFlags = 0;
     // Step 609: menu-only frames have no dungeon camera.
     g_xrStereoFrameReady = false;
-    if (frameState.shouldRender == XR_TRUE && camera != nullptr)
+    if (g_xrPendingShouldRender && camera != nullptr)
     {
         vrRenderStereoTestFrame(camera);
     }
@@ -6920,6 +7301,10 @@ static bool vrProcessGuiSwapchainImage()
         GL_FRAMEBUFFER,
         static_cast<GLuint>(previousFramebuffer)
     );
+    // ZF4: optional capture of the floating GUI panel (magenta = transparent).
+    if (guiCopied)
+        vrDebugDumpTexture(g_xrGuiSwapchainImages[imageIndex].image, false,
+            1280, 720, "gui", false);
 
     // Release the image back to the OpenXR runtime.
     XrSwapchainImageReleaseInfo releaseInfo{};
@@ -7018,6 +7403,44 @@ void vrFinalizeOpenXRFrame()
     {
         endInfo.layerCount = 0u;
         endInfo.layers = nullptr;
+    }
+    // ZF4: record where the GUI panel sits relative to the head.
+    if (g_vrDebugDumpThisFrame)
+    {
+        CreateDirectoryA("vr_debug", nullptr);
+        if (FILE* state = std::fopen("vr_debug/state.txt", "a"))
+        {
+            XrSpaceLocation panel{ XR_TYPE_SPACE_LOCATION };
+            bool panelValid = false;
+            if (showGui && g_xrGuiLayer.space != XR_NULL_HANDLE)
+                panelValid = XR_SUCCEEDED(xrLocateSpace(g_xrGuiLayer.space,
+                    g_xrGuiViewSpace, g_xrPendingDisplayTime, &panel)) &&
+                    (panel.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);
+            float px = 0.f, py = 0.f, pz = 0.f;
+            if (panelValid)
+            {
+                // Panel centre in head space = anchor pose * layer offset.
+                const XrQuaternionf& q = panel.pose.orientation;
+                const XrVector3f& o = g_xrGuiLayer.pose.position;
+                const float tx = 2.f * (q.y * o.z - q.z * o.y);
+                const float ty = 2.f * (q.z * o.x - q.x * o.z);
+                const float tz = 2.f * (q.x * o.y - q.y * o.x);
+                px = panel.pose.position.x + o.x + q.w * tx + (q.y * tz - q.z * ty);
+                py = panel.pose.position.y + o.y + q.w * ty + (q.z * tx - q.x * tz);
+                pz = panel.pose.position.z + o.z + q.w * tz + (q.x * ty - q.y * tx);
+            }
+            std::fprintf(state,
+                "#%03d t=%u intro=%d paused=%d pointer=%d stereo=%d gui=%d layers=%u "
+                "panelInHead=(%.2f %.2f %.2f)%s size=%.2fx%.2f anchored=%d\n",
+                g_vrDebugDumpIndex, SDL_GetTicks(), intro ? 1 : 0, gamePaused ? 1 : 0,
+                vrMenuPointerMode() ? 1 : 0, stereoReady ? 1 : 0, showGui ? 1 : 0,
+                endInfo.layerCount, px, py, pz, panelValid ? "" : " (n/a)",
+                g_xrGuiLayer.size.width, g_xrGuiLayer.size.height,
+                g_xrGuiLayer.space != g_xrGuiViewSpace ? 1 : 0);
+            std::fclose(state);
+        }
+        g_vrDebugDumpThisFrame = false;
+        g_vrDebugDumpIndex = (g_vrDebugDumpIndex + 1) % 30;
     }
     // Submit the frame to SteamVR.
     const XrResult result = xrEndFrame(g_xrSession, &endInfo);
@@ -10305,6 +10728,10 @@ static void vrDrawSpatialHud(view_t* eyeCamera)
         // GA7: No separate head-space dungeon-message surface. Native chat
         // follows the belt below, independently of its fixed capture bounds.
         if (index == 2) continue;
+        // ZF3: the interaction prompt is now kept on the view-centred GUI
+        // layer (vrMaskOriginalWearableHudOnGui), including icon-only
+        // prompts this surface skipped. Do not draw a second copy.
+        if (index == 1) { g_vrWearableCaptured[4].ready = false; continue; }
         SDL_Rect area = vrSpatialHudRect(index, false);
         const SDL_Rect beltOnly = area;
         const auto* beltPanel = index == 0 ? vrPrepareNativeBelt(beltOnly, area) : nullptr;
@@ -10762,7 +11189,22 @@ static void vrMaskOriginalWearableHudOnGui()
         std::vector<SDL_Rect> clearRects{ { 0, 0, 1280, 720 } };
         // Preserve the vanilla character LEVEL-UP announcement ahead of
         // the player. Skill-up artwork is now rendered ONLY below belt XP.
-        for (const SDL_Rect& source : vrTransientProgressAlertRects(false, true))
+        std::vector<SDL_Rect> keepRects = vrTransientProgressAlertRects(false, true);
+        // ZF3: keep Barony's world-interaction prompt (inspect door, pick up
+        // torch, pull lever, talk...). Interaction still targets the view
+        // centre, and this head-locked GUI layer is centred on the view, so
+        // the icon/text lands exactly where the player is looking. The
+        // frame's own size is only an anchor; its text extends around it.
+        {
+            Frame* tooltip = players[clientnum]->hud.worldTooltipFrame;
+            if (tooltip && !tooltip->isDisabled() && !tooltip->isInvisible())
+            {
+                const SDL_Rect anchor = tooltip->getAbsoluteSize();
+                keepRects.push_back({ anchor.x - 260, anchor.y - 90,
+                    anchor.w + 520, anchor.h + 200 });
+            }
+        }
+        for (const SDL_Rect& source : keepRects)
         {
             const int x1 = std::max(0, std::min(1280,
                 static_cast<int>(std::floor(source.x * 1280.0 / Frame::virtualScreenX))));
@@ -14638,6 +15080,10 @@ void vrRenderStereoTestFrame(view_t* camera)
         previousViewport[2],
         previousViewport[3]
     );
+
+    // ZF4: optional headset-free capture of what the left eye receives.
+    vrDebugDumpTexture(g_xrSwapchainImages[imageIndex].image, true,
+        static_cast<int>(g_xrEyeWidth), static_cast<int>(g_xrEyeHeight), "eye", true);
 
     // Release the acquired image back to OpenXR.
     XrSwapchainImageReleaseInfo releaseInfo{};
