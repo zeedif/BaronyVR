@@ -1,0 +1,16 @@
+30	L stick 0 0
+35	R stick 0 0
+35	R trigger 0
+35	L trigger 0
+35	R a 0
+35	R b 0
+35	L x 0
+35	L grip 0
+35	R grip 0
+8724	L stick 0 0.85
+10683	L stick 0 0
+12657	L stick 0 0.85
+14079	L stick 0 0
+14501	L stick 0 0.85
+14705	L stick 0 0
+18793	END

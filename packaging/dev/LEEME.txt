@@ -5,22 +5,38 @@ y Barony de Steam (build 22630456).
 
 Instalar: descomprime el zip y haz doble clic en Instalar.cmd.
 (Si Windows avisa de seguridad, elige "Ejecutar".)
-
 Instalacion manual: copia la carpeta "BaronyVR" de este zip dentro de
 %LOCALAPPDATA% (pega %LOCALAPPDATA% en la barra del Explorador) y acepta reemplazar.
+Para volver a la version oficial: descarga de nuevo la release 1.0.2 y ejecuta su Setup.cmd.
 
-Para volver a la version oficial: en el launcher de BaronyVR usa la reinstalacion,
-o descarga de nuevo la release 1.0.2 y ejecuta su Setup.cmd.
+CONTROLES EN PARTIDA (mandos Quest)
+  Gatillo derecho ...... Atacar. Si hay un aviso de interaccion (puerta, palanca,
+                         objeto, antorcha...) lo usa.
+  A .................... Usar / interactuar
+  B .................... Lanzar hechizo
+  Grip izq. (toque) .... Casilla anterior del hotbar
+  Grip der. (toque) .... Casilla siguiente del hotbar
+  Stick der. arriba .... Equipar la casilla seleccionada (tambien Y)
+  Stick der. izq/der ... Girar     Stick der. abajo ... Giro rapido 180
+  Stick izquierdo ...... Moverse
+  Gatillo izquierdo .... Defender / sigilo
+  X .................... Inventario / ficha
+  Mantener los grips sigue sirviendo para agarrar, beber, mochila y arco.
 
-Novedades:
-- Funciona iniciando desde SteamVR (Steam Link, Virtual Desktop) ademas de Meta Link.
-- El menu principal y la pausa aparecen delante; si giras, el menu vuelve a tu frente.
-- En el lobby, el boton A te une a la partida.
-- En la mazmorra se ve el icono de interaccion (puertas, antorchas, palancas...).
-- Hotbar y mensajes en la parte inferior de la vista.
-- Salud, mana, estados (antebrazo izquierdo) y minimapa (muneca derecha)
-  aparecen al mirarte la muneca.
-- Cofres, tiendas y mesas de trabajo abren su ventana hacia el objeto.
+MENU DE MANO (estilo Demeo)
+  Mira tu muneca izquierda girandola hacia ti (como para ver un reloj):
+  aparecen salud, mana y estados en el antebrazo y, encima de la mano, botones
+  Menu (pausa), Inventario, Hechizos, Mapa y Registro. Apunta con el mando
+  derecho y pulsa gatillo o A. En la muneca derecha: el minimapa.
+  Ya no hace falta el boton de menu izquierdo (que en SteamVR abre su panel).
+
+INTERFAZ
+  - Hotbar y mensajes: debajo de la vista, fijos al cuerpo; baja la mirada para
+    verlos. Siguen el giro solo cuando te giras mas de ~35 grados.
+  - Avisos de interaccion: junto al objeto que puedes usar.
+  - Cofres, tiendas y mesas de trabajo abren su ventana hacia el objeto.
+  - Menus: puntero centrado en la mano; al apretar el gatillo el cursor se
+    queda quieto para no tocar la casilla vecina.
 
 Ajustes en vr_settings.cfg (carpeta de Barony):
   hotbar=view | belt      wrist_ui=look | always      xr_runtime=auto | active | steamvr

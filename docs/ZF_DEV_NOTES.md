@@ -15,6 +15,10 @@ Based on upstream `release/v1.0.2`. Changes are tagged `ZFn` in `src/vr_openxr.c
 | ZF8 | Hotbar on a waist belt, far below the view. | `hotbar=view` (default): hotbar and dungeon messages stay at the bottom of the head-locked GUI layer; `hotbar=belt` restores v1.0.2. |
 | ZF9 | Every screen opened wherever the head pointed. | Vivecraft `guiAppearOverBlock`: chest, shop, workstation, alembic and mailbox screens open toward that object, slightly below eye level; switching screens re-places the panel; gameplay screens stay static (only title/pause/calibration menus follow lazily). |
 | ZF10 | Wrist HUD always on and small. | `wrist_ui=look` (default): health/mana/status effects (left forearm) and minimap (right wrist) appear while the wrist is looked at (28°/38° hysteresis); 1.5x larger. `wrist_ui=always` keeps them visible. |
+| ZF11 | Hotbar followed head pitch; prompts were head-locked; no way to pause without the SteamVR system menu. | Extra OpenXR quad layers with their own swapchains: body-locked hotbar + messages (below eye height, lazy yaw follow at 35°), interaction prompt anchored at Barony's active world-tooltip entity (in range, not necessarily centred), Demeo-style left-hand menu (Pause, Inventory, Spells, Map, Log) drawn with Barony button art and localized strings, right-ray hover + trigger/A. Wrist panels need a real watch gesture (forearm across the view, controller face toward the eyes). |
+| ZF12 | Menu cursor drawn beside the click point; trigger squeeze shifted the ray to the next cell; an untracked controller locked the desktop mouse out. | Cursor centred on its hotspot like Barony, cursor frozen during trigger travel and until a drag leaves a dead zone, laser requires a tracked aim pose. |
+| ZF13 | Xbox-style mapping in VR: no prev/next hotbar, trigger not interacting. | Right trigger = attack, or Use while a prompt shows; A use; B spell; grip taps = hotbar prev/next (linear hotbar forced in VR); right stick up / Y equip; X inventory; holds keep grab/drink/backpack/bow. |
+| ZF14 | Test automation. | `BARONYVR_TEST_INPUT` drives simulated controllers from a file; `vr_debug/pose.txt` logs pose, active prompt and nearby levers/gates/doors; scripts in `tools/vr-harness` (closed-loop navigation, keyboard teleop + replay, direct flow to the first-room lever). |
 | ZF4 | No way to see what the headset shows without wearing it. | `BARONYVR_DEBUG_DUMP=<seconds>` writes `vr_debug/eye_NNN.bmp` (left eye), `vr_debug/gui_NNN.bmp` (GUI panel, magenta = transparent) and `vr_debug/state.txt` (session/menu/panel pose) next to `log.txt`. |
 
 ## Headset-free test setup (used for this branch)
@@ -45,7 +49,6 @@ generated from retail `fmod.dll`; nativefiledialog built from source. Configure 
 
 ## Next (planned)
 
-- Wrist buttons (Inventory, Esc menu, Spells, Map) and touch selection of hotbar slots.
 - Check ZF9 placement and ZF10 thresholds on a real headset.
 - Multiplayer: broadcast head/hand poses (new `VRPS` packet, only to peers that
   announced BaronyVR; vanilla peers ignore unknown packets) so remote players see
