@@ -11,6 +11,10 @@ Based on upstream `release/v1.0.2`. Changes are tagged `ZFn` in `src/vr_openxr.c
 | ZF6 | Title/main menu invisible: v1.0.2 anchors the menu panel in the world where the headset faced on the first tracked frame (often the desk/monitor) and never moves it. | Lazy follow: if the panel is >50° off the view direction (or the player walked >1 m) for 0.65 s, it is placed in front again. Not while a trigger is held. |
 | ZF2 | Lobby "press SPACE / A to join" ignored all controller buttons: the VR gamepad binding raced with Barony releasing controllers when it rebuilds the card, and for online clients the wrong input slot was refreshed. | A on the join card sends Barony's `KeyboardLogin` (Space); the gamepad A is suppressed for that press. Also refreshes `Input::inputs[clientnum]`. |
 | ZF3 | In the dungeon the centre interaction prompts (inspect door, pick up torch, pull lever...) never appeared: during gameplay the whole flat GUI copy is cleared, and the separate "forward" surface only existed for prompts with text. | The world-tooltip rectangle is kept on the view-centred GUI layer (where interaction is aimed); the duplicate forward surface is disabled. |
+| ZF7 | Wrist UI could not be checked without controllers. | `BARONYVR_TEST_FAKE_HANDS=1` gives untracked hands synthetic poses (`BARONYVR_TEST_LEFT_HAND` / `_RIGHT_HAND` = "x,y,z,yaw,pitch,roll"); gameplay only. |
+| ZF8 | Hotbar on a waist belt, far below the view. | `hotbar=view` (default): hotbar and dungeon messages stay at the bottom of the head-locked GUI layer; `hotbar=belt` restores v1.0.2. |
+| ZF9 | Every screen opened wherever the head pointed. | Vivecraft `guiAppearOverBlock`: chest, shop, workstation, alembic and mailbox screens open toward that object, slightly below eye level; switching screens re-places the panel; gameplay screens stay static (only title/pause/calibration menus follow lazily). |
+| ZF10 | Wrist HUD always on and small. | `wrist_ui=look` (default): health/mana/status effects (left forearm) and minimap (right wrist) appear while the wrist is looked at (28°/38° hysteresis); 1.5x larger. `wrist_ui=always` keeps them visible. |
 | ZF4 | No way to see what the headset shows without wearing it. | `BARONYVR_DEBUG_DUMP=<seconds>` writes `vr_debug/eye_NNN.bmp` (left eye), `vr_debug/gui_NNN.bmp` (GUI panel, magenta = transparent) and `vr_debug/state.txt` (session/menu/panel pose) next to `log.txt`. |
 
 ## Headset-free test setup (used for this branch)
@@ -36,16 +40,13 @@ zlib openxr-loader rapidjson jsoncpp dirent`; Steamworks SDK 1.59 headers
 (interfaces match retail build 22630456); FMOD 2.02.x headers with an import lib
 generated from retail `fmod.dll`; nativefiledialog built from source. Configure with
 `STEAMWORKS_ENABLED=1`, `EOS_ENABLED=0`, `-DFMOD_ENABLED=ON
--DCMAKE_POLICY_VERSION_MINIMUM=3.5`. `packaging/dev/Install-DevBuild.ps1` installs a
-build into the managed BaronyVR install (with backup), `Restore-DevBuild.ps1` undoes it.
+-DCMAKE_POLICY_VERSION_MINIMUM=3.5`. `packaging/dev/Make-DevZip.ps1 -Build <dir>` creates a shareable zip; players run
+`Instalar.cmd` (double click) to copy it into `%LOCALAPPDATA%BaronyVRManaged`.
 
 ## Next (planned)
 
-- Wrist UI (Vivecraft `HUDLock.WRIST`, Demeo): hotbar on the left forearm, shown
-  when the wrist is turned toward the face; small wrist buttons for Inventory,
-  Menu (Esc), Spells and Map instead of the head-following belt.
-- Modal screens (inventory, chest, shop, Esc) open in front of the player at open
-  time; chests optionally above the chest (Vivecraft `guiAppearOverBlock`).
+- Wrist buttons (Inventory, Esc menu, Spells, Map) and touch selection of hotbar slots.
+- Check ZF9 placement and ZF10 thresholds on a real headset.
 - Multiplayer: broadcast head/hand poses (new `VRPS` packet, only to peers that
   announced BaronyVR; vanilla peers ignore unknown packets) so remote players see
   VR arm gestures.

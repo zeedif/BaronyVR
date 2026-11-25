@@ -35,6 +35,7 @@
 #include "ui/Frame.hpp" // STEP638EI: real HP/MP and minimap frame rectangles.
 #include "ui/GameUI.hpp" // STEP638FB: original StatusEffectQueue icon artwork and layout.
 #include "ui/MainMenu.hpp" // STEP 624: Detect the real character-creation lobby.
+#include "shops.hpp" // ZF9: shopkeeper uid for placing the shop screen.
 // Barony's existing game pause state.
 extern bool gamePaused;
 // VR-specific viewport control defined in opengl.cpp.
@@ -755,6 +756,12 @@ static const char* vrPlayModeName()
 static bool g_vrUserEnabled = true;
 // ZF1: OpenXR runtime selection (see vrOpenXRTest). Kept in vr_settings.cfg.
 static std::string g_vrXrRuntimePreference = "auto";
+// ZF10: "look" (default) = wrist panels appear when the wrist is looked at; "always".
+static bool g_vrWristUiOnLook = true;
+static bool g_vrWristLook[2] = { false, false };
+// ZF8: "view" (default) = hotbar at the bottom of the view; "belt" = v1.0.2 belt.
+static bool g_vrHotbarAtViewBottom = true;
+static bool vrHotbarAtViewBottom() { return g_vrHotbarAtViewBottom; }
 static bool g_vrFlailVisualEnabled = true;
 // Cosmetic-only flail pivot and chain tuning in Barony world units.
 static float g_vrFlailAnchorForward = 2.4f;
@@ -781,6 +788,14 @@ static void vrReadFeatureSettings()
             g_vrUserEnabled = false;
         else if (std::strncmp(line, "vr_enabled=1", 12) == 0)
             g_vrUserEnabled = true;
+        else if (std::strncmp(line, "wrist_ui=always", 15) == 0)
+            g_vrWristUiOnLook = false;
+        else if (std::strncmp(line, "wrist_ui=look", 13) == 0)
+            g_vrWristUiOnLook = true;
+        else if (std::strncmp(line, "hotbar=belt", 11) == 0)
+            g_vrHotbarAtViewBottom = false;
+        else if (std::strncmp(line, "hotbar=view", 11) == 0)
+            g_vrHotbarAtViewBottom = true;
         else if (std::strncmp(line, "xr_runtime=", 11) == 0)
         {
             // ZF1: auto | active | steamvr | <path to an OpenXR runtime .json>
@@ -830,14 +845,20 @@ static void vrSaveModeSettings()
             "flail_damping=%.3f\nflail_model_size=%.3f\nmode=%s\nroom_scale=%d\n"
             "# xr_runtime: auto (SteamVR when it is running, else the active runtime,\n"
             "# falling back to the other), active, steamvr, or a runtime .json path.\n"
-            "xr_runtime=%s\n",
+            "xr_runtime=%s\n"
+            "# hotbar: view (bottom of the view) or belt (v1.0.2 waist belt).\n"
+            "hotbar=%s\n"
+            "# wrist_ui: look (health/map show when you look at your wrist) or always.\n"
+            "wrist_ui=%s\n",
             g_vrUserEnabled ? 1 : 0, g_vrFlailVisualEnabled ? 1 : 0,
             g_vrFlailAnchorForward, g_vrFlailAnchorUp,
             g_vrFlailChainLength, g_vrFlailAnchorSide, g_vrFlailDamping,
             g_vrFlailModelSize,
             g_xrPlayMode == VrPlayMode::Standing ? "standing" : "seated",
             g_vrRoomScaleEnabled ? 1 : 0,
-            g_vrXrRuntimePreference.c_str());
+            g_vrXrRuntimePreference.c_str(),
+            g_vrHotbarAtViewBottom ? "view" : "belt",
+            g_vrWristUiOnLook ? "look" : "always");
         std::fclose(file);
         g_vrFlailSettingsDirty = false;
     }
@@ -5732,6 +5753,47 @@ void vrPollOpenXREvents()
 // Both grip and aim poses are relative to the SAME LOCAL reference space.
 static void vrProcessPhysicalMelee(XrTime predictedDisplayTime);
 static void vrUpdateCustomCrosshairAim(XrTime predictedTime);
+// ZF7 test hook: SteamVR's null driver has no controllers. With
+// BARONYVR_TEST_FAKE_HANDS=1, untracked hands get synthetic poses relative to
+// the head so wrist UI can be checked with BARONYVR_DEBUG_DUMP. Pose override:
+// BARONYVR_TEST_LEFT_HAND / BARONYVR_TEST_RIGHT_HAND = "x,y,z,yaw,pitch,roll"
+// (metres in the head's yaw frame, -Z forward; degrees).
+static XrQuaternionf vrQuatMul(const XrQuaternionf& a, const XrQuaternionf& b)
+{
+    return { a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+             a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+             a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+             a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
+}
+static void vrTestFakeHandPose(int handIndex, XrTime time, VrControllerHandState& state)
+{
+    static const bool enabled = []() {
+        const char* v = std::getenv("BARONYVR_TEST_FAKE_HANDS");
+        return v && v[0] == '1';
+    }();
+    // Menus stay mouse-driven in tests: a fake ray would own the mouse.
+    if (!enabled || intro || state.gripPoseValid || g_xrGuiViewSpace == XR_NULL_HANDLE) return;
+    float p[6] = { -0.10f, -0.22f, -0.30f, -90.f, 0.f, -60.f }; // left: looking at the watch
+    if (handIndex == 1) { p[0] = 0.18f; p[1] = -0.35f; p[2] = -0.35f; p[3] = 0.f; p[4] = -20.f; p[5] = 0.f; }
+    if (const char* v = std::getenv(handIndex ? "BARONYVR_TEST_RIGHT_HAND" : "BARONYVR_TEST_LEFT_HAND"))
+        std::sscanf(v, "%f,%f,%f,%f,%f,%f", &p[0], &p[1], &p[2], &p[3], &p[4], &p[5]);
+    XrSpaceLocation head{ XR_TYPE_SPACE_LOCATION };
+    if (XR_FAILED(xrLocateSpace(g_xrGuiViewSpace, g_xrReferenceSpace, time, &head))) return;
+    const XrQuaternionf& h = head.pose.orientation;
+    const float headYaw = atan2f(2.f * (h.w * h.y + h.x * h.z), 1.f - 2.f * (h.y * h.y + h.x * h.x));
+    const float c = cosf(headYaw), s = sinf(headYaw);
+    const float d2r = 0.0174533f;
+    auto axis = [](float angle, float x, float y, float z) {
+        return XrQuaternionf{ x * sinf(angle * .5f), y * sinf(angle * .5f), z * sinf(angle * .5f), cosf(angle * .5f) }; };
+    XrQuaternionf q = vrQuatMul(axis(headYaw + p[3] * d2r, 0, 1, 0), axis(p[4] * d2r, 1, 0, 0));
+    q = vrQuatMul(q, axis(p[5] * d2r, 0, 0, 1));
+    state.gripPose.orientation = q;
+    state.gripPose.position = { head.pose.position.x + c * p[0] + s * p[2],
+        head.pose.position.y + p[1], head.pose.position.z - s * p[0] + c * p[2] };
+    state.aimPose = state.gripPose;
+    state.gripPoseValid = state.aimPoseValid = true;
+}
+
 static void vrUpdateControllerInputs(XrTime predictedDisplayTime)
 {
     if (!g_xrControllerActionsAttached || g_xrSession == XR_NULL_HANDLE ||
@@ -5859,6 +5921,7 @@ static void vrUpdateControllerInputs(XrTime predictedDisplayTime)
             state.gripPoseValid, state.gripPose);
         readPose(aims[handIndex], hand, aimSpaces[handIndex],
             state.aimPoseValid, state.aimPose);
+        vrTestFakeHandPose(handIndex, predictedDisplayTime, state);
 
         // Report input transitions immediately; brief presses should not be
         // missed between the periodic snapshots below. This is diagnostic
@@ -6080,8 +6143,53 @@ static void vrS8ApplyEffectiveLocalRecenter(XrTime predictedDisplayTime)
         "OpenXR S8: LOCAL recenter APPLIED at frame=%lld events=%u; room baseline invalidated; menu anchor cleared for rebuild.\n",
         static_cast<long long>(predictedDisplayTime), applied);
 }
+// ZF9: the world object behind the open screen, if any (chest, shopkeeper,
+// workstation, alembic, mailbox). label receives a short name for logging.
+static Entity* vrInteractedUiEntity(const char** label)
+{
+    if (clientnum < 0 || clientnum >= MAXPLAYERS || !players[clientnum]) return nullptr;
+    Player* const p = players[clientnum];
+    Entity* target = nullptr;
+    const char* name = nullptr;
+    if (p->inventoryUI.chestGUI.bOpen && openedChest[clientnum])
+    { target = openedChest[clientnum]; name = "chest"; }
+    else if (p->shopGUI.bOpen && shopkeeper[clientnum])
+    { target = uidToEntity(shopkeeper[clientnum]); name = "shopkeeper"; }
+    else if (GenericGUI[clientnum].isGUIOpen())
+    {
+        const auto& g = GenericGUI[clientnum];
+        const Uint32 uid = g.workstationEntityUid ? g.workstationEntityUid :
+            (g.alembicEntityUid ? g.alembicEntityUid : g.mailboxEntityUid);
+        if (uid) { target = uidToEntity(uid); name = "workstation"; }
+    }
+    if (label) *label = target ? name : nullptr;
+    return target;
+}
+
+// ZF9: which kind of gameplay screen is open, so switching screens (e.g.
+// inventory -> chest) re-places the panel like Vivecraft does on screen change.
+static int vrGameplayUiKind()
+{
+    if (intro || clientnum < 0 || clientnum >= MAXPLAYERS || !players[clientnum]) return 0;
+    if (gamePaused) return 1;
+    Player* const p = players[clientnum];
+    if (p->inventoryUI.chestGUI.bOpen) return 2;
+    if (p->shopGUI.bOpen) return 3;
+    if (GenericGUI[clientnum].isGUIOpen()) return 4;
+    return vrMenuPointerMode() ? 5 : 0;
+}
+
 static void vrS5UpdateIntroMenuAnchor(XrTime predictedDisplayTime)
 {
+    {
+        static int lastKind = 0;
+        const int kind = vrGameplayUiKind();
+        if (kind != lastKind)
+        {
+            if (lastKind && kind) vrS5ClearIntroMenuAnchor();
+            lastKind = kind;
+        }
+    }
     if (vrS7RecenterDiagnosticsRequested() &&
         g_vrS7RefSpaceChangePending &&
         predictedDisplayTime >= g_vrS7RefSpaceChangeTime)
@@ -6124,7 +6232,9 @@ static void vrS5UpdateIntroMenuAnchor(XrTime predictedDisplayTime)
     // backdrop. If the panel stays far from where the player looks (or they
     // walked away from it), place it in front of them again. Never move it
     // while a trigger is held, so pointer clicks/drags are not disturbed.
-    if (g_xrS5IntroMenuAnchorSpace != XR_NULL_HANDLE)
+    // Gameplay screens stay where they opened (Vivecraft keeps container
+    // screens static); only title/pause/calibration menus follow lazily.
+    if (g_xrS5IntroMenuAnchorSpace != XR_NULL_HANDLE && (intro || gamePaused || calibrationUi))
     {
         XrSpaceLocation now{ XR_TYPE_SPACE_LOCATION };
         if (XR_SUCCEEDED(xrLocateSpace(g_xrGuiViewSpace, g_xrReferenceSpace,
@@ -6190,10 +6300,33 @@ static void vrS5UpdateIntroMenuAnchor(XrTime predictedDisplayTime)
             g_xrGuiLayer.space = g_xrGuiViewSpace;
             return;
         }
-        const float menuYaw = atan2f(-forwardX, -forwardZ);
+        float menuYaw = atan2f(-forwardX, -forwardZ);
+        // ZF9 (Vivecraft guiAppearOverBlock): a chest, shop, workstation,
+        // alembic or mailbox screen opens toward the object that was used,
+        // slightly below eye level, instead of wherever the head pointed.
+        float heightOffset = 0.f;
+        const char* placedOver = nullptr;
+        if (!intro && !calibrationUi && !gamePaused)
+        {
+            if (Entity* target = vrInteractedUiEntity(&placedOver))
+            {
+                const view_t& cam = cameras[clientnum];
+                const float bearing = atan2f(static_cast<float>(target->y / 16.0 - cam.y),
+                    static_cast<float>(target->x / 16.0 - cam.x));
+                float relative = bearing - (static_cast<float>(cam.ang) - vrHeadYaw);
+                while (relative > 3.14159265f) relative -= 6.2831853f;
+                while (relative < -3.14159265f) relative += 6.2831853f;
+                relative = std::max(-1.1f, std::min(1.1f, relative));
+                menuYaw -= relative;
+                heightOffset = -0.12f;
+            }
+        }
         XrReferenceSpaceCreateInfo info{ XR_TYPE_REFERENCE_SPACE_CREATE_INFO };
         info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
         info.poseInReferenceSpace = head.pose; // preserve tracked eye position
+        info.poseInReferenceSpace.position.y += heightOffset;
+        if (placedOver)
+            printlog("[VR ZF9] screen placed toward the %s", placedOver);
         info.poseInReferenceSpace.orientation.x = 0.0f;
         info.poseInReferenceSpace.orientation.y = sinf(menuYaw * 0.5f);
         info.poseInReferenceSpace.orientation.z = 0.0f;
@@ -6232,6 +6365,37 @@ static void vrS5UpdateIntroMenuAnchor(XrTime predictedDisplayTime)
 static bool g_xrFramePending = false;
 static XrTime g_xrPendingDisplayTime = 0;
 static bool g_xrPendingShouldRender = false;
+
+// ZF10 (Demeo / Vivecraft wrist HUD): wrist panels appear while the player
+// looks at that wrist - head forward within ~28 deg of the controller, hidden
+// again beyond ~38 deg (hysteresis avoids flicker). OpenXR metres throughout.
+static void vrUpdateWristLook()
+{
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        const VrControllerHandState& state = g_xrControllerHands[hand];
+        if (!g_vrWristUiOnLook) { g_vrWristLook[hand] = true; continue; }
+        if (!g_xrEyeViewsValid || !state.gripPoseValid) { g_vrWristLook[hand] = false; continue; }
+        const XrQuaternionf& q = g_xrViews[0].pose.orientation;
+        const float fx = -2.f * (q.x * q.z + q.w * q.y);
+        const float fy = -2.f * (q.y * q.z - q.w * q.x);
+        const float fz = -(1.f - 2.f * (q.x * q.x + q.y * q.y));
+        const float hx = 0.5f * (g_xrViews[0].pose.position.x + g_xrViews[1].pose.position.x);
+        const float hy = 0.5f * (g_xrViews[0].pose.position.y + g_xrViews[1].pose.position.y);
+        const float hz = 0.5f * (g_xrViews[0].pose.position.z + g_xrViews[1].pose.position.z);
+        const float dx = state.gripPose.position.x - hx;
+        const float dy = state.gripPose.position.y - hy;
+        const float dz = state.gripPose.position.z - hz;
+        const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (distance < 0.05f || distance > 0.9f) { g_vrWristLook[hand] = false; continue; }
+        const float cosine = (fx * dx + fy * dy + fz * dz) / distance;
+        const bool was = g_vrWristLook[hand];
+        g_vrWristLook[hand] = was ? cosine > 0.788f /* 38 deg */ : cosine > 0.883f /* 28 deg */;
+        if (was != g_vrWristLook[hand])
+            printlog("[VR ZF10] %s wrist panel %s", hand ? "right" : "left",
+                g_vrWristLook[hand] ? "shown" : "hidden");
+    }
+}
 
 void vrProcessOpenXRFrame(view_t* camera)
 {
@@ -6319,6 +6483,7 @@ void vrProcessOpenXRFrame(view_t* camera)
     vrUpdateControllerInputs(frameState.predictedDisplayTime);
     // Retrieve headset tracking for both eyes at the predicted display time.
     vrLocateEyeViews(frameState.predictedDisplayTime);
+    vrUpdateWristLook(); // ZF10: is the player looking at a wrist panel?
     VrRoomScale::update(frameState.predictedDisplayTime);
     vrUpdateWorldGrabs(); // GA24: same-frame head/hands, before melee and final SDL forwarding.
     VrPotionDrink::sample(); // Queue only; native item consumption occurs before render traversal.
@@ -9896,6 +10061,9 @@ static void vrDrawWearableHudFoundation(view_t* eyeCamera, int handIndex,
         clientnum < 0 || clientnum >= MAXPLAYERS ||
         !players[clientnum] || !players[clientnum]->shootmode)
         return;
+    // ZF10: only while the player looks at this wrist (wrist_ui=look).
+    if (handIndex >= 0 && handIndex < 2 && !g_vrWristLook[handIndex])
+        return;
     auto& hud = players[clientnum]->hud;
     SDL_Rect area{};
     if (handIndex == 0)
@@ -9941,7 +10109,8 @@ static void vrDrawWearableHudFoundation(view_t* eyeCamera, int handIndex,
     marker->z = trackedHand->z - offset.y;
     vrGripBasisToBaronyAngles(adjusted, static_cast<float>(trackedHand->yaw),
         marker->yaw, marker->pitch, marker->roll);
-    const float desiredWidth = handIndex == 0 ? 1.45f : 1.24f;
+    // ZF10: 1.5x the v1.0.2 size, readable at a glance (calibration scale still applies).
+    const float desiredWidth = handIndex == 0 ? 2.2f : 1.85f;
     const float scale = desiredWidth * v.scale / static_cast<float>(panel.width);
     marker->scalex = marker->scaley = marker->scalez = scale;
     marker->focalx = marker->focaly = marker->focalz = 0.0;
@@ -10732,6 +10901,13 @@ static void vrDrawSpatialHud(view_t* eyeCamera)
         // layer (vrMaskOriginalWearableHudOnGui), including icon-only
         // prompts this surface skipped. Do not draw a second copy.
         if (index == 1) { g_vrWearableCaptured[4].ready = false; continue; }
+        // ZF8: hotbar lives at the bottom of the view instead of the belt.
+        if (index == 0 && vrHotbarAtViewBottom())
+        {
+            g_vrNativeBeltReady = false;
+            g_vrWearableCaptured[3].ready = false;
+            continue;
+        }
         SDL_Rect area = vrSpatialHudRect(index, false);
         const SDL_Rect beltOnly = area;
         const auto* beltPanel = index == 0 ? vrPrepareNativeBelt(beltOnly, area) : nullptr;
@@ -11203,6 +11379,16 @@ static void vrMaskOriginalWearableHudOnGui()
                 keepRects.push_back({ anchor.x - 260, anchor.y - 90,
                     anchor.w + 520, anchor.h + 200 });
             }
+        }
+        // ZF8: hotbar and dungeon messages stay at the bottom of the
+        // view (this layer follows the head), replacing the belt surface.
+        // Health/mana, status effects and the minimap remain on the arms.
+        if (vrHotbarAtViewBottom())
+        {
+            const SDL_Rect hotbar = vrSpatialHudRect(0, false);
+            if (hotbar.w > 0 && hotbar.h > 0) keepRects.push_back(hotbar);
+            const SDL_Rect chat = vrSpatialHudRect(2);
+            if (chat.w > 0 && chat.h > 0) keepRects.push_back(chat);
         }
         for (const SDL_Rect& source : keepRects)
         {

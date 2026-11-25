@@ -1,0 +1,26 @@
+BaronyVR - build de desarrollo (fork zeedif/BaronyVR, rama vr-ux-improvements)
+
+Requisito: tener instalado BaronyVR 1.0.2 (https://github.com/Nyxaroth37/BaronyVR/releases)
+y Barony de Steam (build 22630456).
+
+Instalar: descomprime el zip y haz doble clic en Instalar.cmd.
+(Si Windows avisa de seguridad, elige "Ejecutar".)
+
+Instalacion manual: copia la carpeta "BaronyVR" de este zip dentro de
+%LOCALAPPDATA% (pega %LOCALAPPDATA% en la barra del Explorador) y acepta reemplazar.
+
+Para volver a la version oficial: en el launcher de BaronyVR usa la reinstalacion,
+o descarga de nuevo la release 1.0.2 y ejecuta su Setup.cmd.
+
+Novedades:
+- Funciona iniciando desde SteamVR (Steam Link, Virtual Desktop) ademas de Meta Link.
+- El menu principal y la pausa aparecen delante; si giras, el menu vuelve a tu frente.
+- En el lobby, el boton A te une a la partida.
+- En la mazmorra se ve el icono de interaccion (puertas, antorchas, palancas...).
+- Hotbar y mensajes en la parte inferior de la vista.
+- Salud, mana, estados (antebrazo izquierdo) y minimapa (muneca derecha)
+  aparecen al mirarte la muneca.
+- Cofres, tiendas y mesas de trabajo abren su ventana hacia el objeto.
+
+Ajustes en vr_settings.cfg (carpeta de Barony):
+  hotbar=view | belt      wrist_ui=look | always      xr_runtime=auto | active | steamvr
