@@ -477,8 +477,10 @@ static void vrDrawSelectedCrosshairOnGui()
     Image* img = Image::get(players[clientnum]->hud.getCrosshairPath());
     if (!img || img->getWidth() == 0 || img->getHeight() == 0) return;
 
-    const int sizeX = static_cast<int>(img->getWidth());
-    const int sizeY = static_cast<int>(img->getHeight());
+    // ZF20: the cue is the only sign of blocking/charging (the tracked hands do
+    // not play Barony's raise-shield / wind-up animations), so draw it 2.5x.
+    const int sizeX = static_cast<int>(img->getWidth()) * 5 / 2;
+    const int sizeY = static_cast<int>(img->getHeight()) * 5 / 2;
     const int x = 640;
     const int y = 360;
     const int setting = playerSettings[multiplayer ? 0 : clientnum].shootmodeCrosshairOpacity;
@@ -779,7 +781,10 @@ static std::unordered_map<std::string, float> g_vrActionsNow;
 static Uint32 g_vrActionsTicks = 0; // when the set was rebuilt; stale sets are ignored
 static const std::vector<std::string> g_vrActionNames = {
     "Use", "Cast Spell", "Hotbar Up / Select", "Interact Tooltip Next",
-    "Call Out", "Show NPC Commands", "GamepadLoginA" };
+    "Call Out", "Show NPC Commands", "GamepadLoginA", "Pause Game" };
+// ZF20: B pressed to close a window stays "menu" until released, so the same
+// press cannot cast a spell once the window is gone and shootmode returns.
+static bool g_vrBackHeldFromMenu = false;
 static int vrActionInputPlayer() { return multiplayer != SINGLE ? 0 : clientnum; }
 static void vrAction(const char* name, bool on, float analog = 1.f)
 {
@@ -802,7 +807,7 @@ static bool g_vrCallOutPulse = false, g_vrNextInteractPulse = false; // ZF15: L3
 static float g_vrDebugHotbarUV[3] = { -1.f, -1.f, -1.f }; // u, v, slot (debug)
 struct VrXrPanel;
 static bool vrPanelRayUV(const VrXrPanel& p, const XrPosef& aim, float& u, float& v);
-static void vrHaptic(int hand, float amplitude);
+static void vrHaptic(int hand, float amplitude, int ms = 15);
 static void vrUpdateExtraPanels();
 static uint32_t vrAppendExtraLayers(const XrCompositionLayerBaseHeader** layers,
     uint32_t count, uint32_t maxCount);
@@ -1305,12 +1310,23 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     // ZF17: B is "back / close" in every menu again (inventory, chests,
     // pause menu...); X and Y are free, the wrist panel opens windows.
     const bool menuBackDown = right.secondaryButton;
-    if (menuBackDown != g_xrVrMenuEscapeWasDown)
+    if (menuBackDown) g_vrBackHeldFromMenu = true;
+    // ZF20: in game the VR pad is the player's controller, and Barony only
+    // turns Escape into "close windows" for keyboard players (for everybody
+    // else it pauses). Inject the native Pause Game action instead: with a
+    // window open it runs closeAllGUIs, which also closes windows without a
+    // MenuCancel handler of their own (assist shrine, ...).
+    const bool inGameWindow = !intro && !gamePaused && clientnum >= 0 &&
+        clientnum < MAXPLAYERS && players[clientnum] &&
+        !players[clientnum]->GUI.isGameoverActive();
+    vrAction("Pause Game", inGameWindow && menuBackDown);
+    const bool escapeDown = menuBackDown && !inGameWindow;
+    if (escapeDown != g_xrVrMenuEscapeWasDown)
     {
-        vrSendMenuKey(SDLK_ESCAPE, menuBackDown);
-        g_xrVrMenuEscapeWasDown = menuBackDown;
+        vrSendMenuKey(SDLK_ESCAPE, escapeDown);
+        g_xrVrMenuEscapeWasDown = escapeDown;
         std::printf("OpenXR VR: STEP620 MENU ESCAPE %s\n",
-            menuBackDown ? "DOWN" : "UP");
+            escapeDown ? "DOWN" : "UP");
     }
 
     // Left grip temporarily turns the right stick into pointer alignment
@@ -4194,6 +4210,16 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     if (triggerDownNow && !triggerWasDown)
         triggerUseLatched = g_vrPromptVisible && !vrMenuPointerMode() &&
             !g_vrHandMenuOwnsRight && !g_vrHotbarOwnsTrigger[1] && !bowControls;
+    // ZF20: haptic confirmation of the press: a light tick for Use, a firmer
+    // one when the trigger goes to Barony as an attack (crossbow, staff,
+    // thrown item...). Melee and the physical bow pulse on their own events.
+    if (triggerDownNow && !triggerWasDown)
+    {
+        if (triggerUseLatched) vrHaptic(1, 0.3f, 20);
+        else if (!physicalMeleeOwnsAttack && !bowControls && !vrMenuPointerMode() &&
+            !g_vrHotbarOwnsTrigger[1] && !g_vrHandMenuOwnsRight && !g_xrVrPointerActive)
+            vrHaptic(1, 0.45f, 30);
+    }
     if (right.trigger < 0.3f) triggerUseLatched = false;
     triggerWasDown = triggerDownNow;
     setAxis(g_xrVirtualSDLJoystick, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,
@@ -4266,7 +4292,8 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     (void)bowOwnsRightGrip;
     vrAction("Use", (right.primaryButton || triggerUseLatched) && !g_vrHandMenuOwnsRight);
     vrAction("Hotbar Up / Select", static_cast<Sint32>(g_vrHotbarEquipPulseUntil - tapNow) > 0);
-    vrAction("Cast Spell", !bowControls && right.secondaryButton &&
+    if (!right.secondaryButton) g_vrBackHeldFromMenu = false;
+    vrAction("Cast Spell", !bowControls && right.secondaryButton && !g_vrBackHeldFromMenu &&
         !g_vrMeleeExitGripsSuppressed);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_X, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_Y, false);
@@ -13621,6 +13648,16 @@ static void vrProcessPhysicalMelee(XrTime predictedDisplayTime)
     g_vrMeleeChargeVisible = charging;
     g_vrMeleeChargeFraction = charging ?
         static_cast<float>(chargeTicks) / static_cast<float>(maxCharge) : 0.f;
+    // ZF20: haptic cues for the charge: a tick when it starts, a firm pulse
+    // when it is full.
+    {
+        static bool wasCharging = false, wasFull = false;
+        const bool full = charging && chargeTicks >= maxCharge;
+        if (charging && !wasCharging) vrHaptic(1, 0.2f, 12);
+        if (full && !wasFull) vrHaptic(1, 0.7f, 45);
+        wasCharging = charging;
+        wasFull = full;
+    }
 
     const XrPosef& gripPose = g_xrControllerHands[1].gripPose;
     const XrVector3f head{
@@ -13871,6 +13908,8 @@ static void vrProcessPhysicalMelee(XrTime predictedDisplayTime)
         g_vrSwingTraceAimActive = true;
     }
     attacker->attack(attackPose, attackCharge, nullptr);
+    // ZF20: the swing was recognised as an attack.
+    vrHaptic(1, attackCharge > 0 ? 1.f : 0.6f, attackCharge > 0 ? 70 : 40);
     // Clear immediately: other actors, queued attacks and the next game
     // tick must always take the ordinary combat path.
     g_vrSwingTraceAimActive = false;
@@ -15979,12 +16018,12 @@ static bool vrPanelRayUV(const VrXrPanel& p, const XrPosef& aim, float& u, float
     return u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f;
 }
 
-static void vrHaptic(int hand, float amplitude)
+static void vrHaptic(int hand, float amplitude, int ms)
 {
     if (g_xrHapticAction == XR_NULL_HANDLE || g_xrSession == XR_NULL_HANDLE) return;
     XrHapticVibration pulse{ XR_TYPE_HAPTIC_VIBRATION };
     pulse.amplitude = amplitude;
-    pulse.duration = 15000000; // 15 ms
+    pulse.duration = static_cast<XrDuration>(ms) * 1000000;
     pulse.frequency = XR_FREQUENCY_UNSPECIFIED;
     XrHapticActionInfo info{ XR_TYPE_HAPTIC_ACTION_INFO };
     info.action = g_xrHapticAction;
@@ -16112,7 +16151,20 @@ static XrVector3f vrWristAnchor(const XrVector3f& wrist, const XrVector3f& head,
 {
     const float tx = head.x - wrist.x, tz = head.z - wrist.z;
     const float tl = std::max(0.01f, sqrtf(tx * tx + tz * tz));
-    return { wrist.x + toward * tx / tl, wrist.y + up, wrist.z + toward * tz / tl };
+    XrVector3f a{ wrist.x + toward * tx / tl, wrist.y + up, wrist.z + toward * tz / tl };
+    // ZF20: a wrist held close to the face put the 15 cm panel a few
+    // centimetres from the eyes: it filled the view in steep perspective and
+    // the compositor clipped it at the near plane (only some buttons showed).
+    // Keep it at a readable distance along the same line of sight.
+    constexpr float MinEyeDistance = 0.30f;
+    const XrVector3f d{ a.x - head.x, a.y - head.y, a.z - head.z };
+    const float dl = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+    if (dl > 0.001f && dl < MinEyeDistance)
+    {
+        const float k = MinEyeDistance / dl;
+        a = { head.x + d.x * k, head.y + d.y * k, head.z + d.z * k };
+    }
+    return a;
 }
 
 // ZF16: ONE wrist panel on the hand that made the watch gesture: effects,
@@ -16248,6 +16300,22 @@ static void vrUpdateExtraPanels()
     {
         playerSettings[multiplayer ? 0 : clientnum].gamepad_facehotbar = false;
         players[clientnum]->hotbar.useHotbarFaceMenu = false;
+    }
+    // ZF20: blocking feedback on the shield hand (the tracked arm does not
+    // play Barony's raise-shield animation): a pulse when the shield goes up,
+    // a strong one when a timed block lands.
+    {
+        static bool wasDefending = false;
+        static Uint32 lastBlockFlash = 0;
+        const bool defending = !intro && !gamePaused && clientnum >= 0 && clientnum < MAXPLAYERS &&
+            stats[clientnum] && stats[clientnum]->defending && stats[clientnum]->shield;
+        if (defending && !wasDefending) vrHaptic(0, 0.45f, 35);
+        wasDefending = defending;
+        if (g_vrTimedBlockFlashActive && g_vrTimedBlockFlashTick != lastBlockFlash)
+        {
+            lastBlockFlash = g_vrTimedBlockFlashTick;
+            vrHaptic(0, 1.f, 90);
+        }
     }
     vrTestWritePose();
     vrUpdateHotbarPanel(dt);

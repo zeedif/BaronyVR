@@ -10,8 +10,19 @@ Instalacion manual: copia la carpeta "BaronyVR" de este zip dentro de
 Para volver a la version oficial: descarga de nuevo la release 1.0.2 y ejecuta su Setup.cmd.
 
 CONTROLES EN PARTIDA (mandos Quest)
-  Gatillo derecho ...... Atacar. Si hay un aviso de interaccion (puerta, palanca,
-                         objeto, antorcha...) lo usa.
+  Gatillo derecho ...... Si hay un aviso de interaccion (puerta, palanca, objeto,
+                         antorcha...) lo usa. Si no, depende del arma:
+                         - Cuerpo a cuerpo y punos: el golpe es el gesto de
+                           blandir el brazo. Mantener el gatillo solo CARGA un
+                           golpe mas fuerte (la mira se llena; vibra al empezar
+                           y al llegar al maximo). Suelta y vuelve a pulsar para
+                           cargar el siguiente.
+                         - Arco corto: se tensa y suelta con las manos.
+                         - Ballesta, bastones, objetos arrojadizos: el gatillo
+                           ataca como en un mando (mantener / soltar).
+                         - Como cliente en multijugador el gatillo ataca como
+                           en un mando con todas las armas.
+                         Cada golpe reconocido vibra en la mano derecha.
   Gatillo (apuntando
    al hotbar) .......... Equipa esa casilla (vale con cualquier mano)
   A .................... Usar / interactuar
@@ -22,11 +33,13 @@ CONTROLES EN PARTIDA (mandos Quest)
                          stick der. = ordenes a aliados (tecla C).
   Stick izquierdo ...... Moverse
   Stick der. izq/der ... Girar     Stick der. abajo ... Giro rapido 180
-  Gatillo izquierdo .... Defender / sigilo
+  Gatillo izquierdo .... Defender (con escudo; la mira se vuelve azul grande y la
+                         mano izquierda vibra al subir el escudo, fuerte en un
+                         bloqueo a tiempo) / sigilo
   Pulsar ambos sticks .. Menu de pausa (mantener 1,5 s: cambiar modo de juego)
   Los grips siguen sirviendo para agarrar, beber, mochila y arco.
 
-CON VENTANAS ABIERTAS (inventario, hechizos, cofre, tienda, mapa, pausa...)
+CON VENTANAS ABIERTAS (inventario, hechizos, cofre, tienda, altar, mapa, pausa...)
   B .................... Cerrar / atras (en el menu de pausa: volver al juego)
   Gatillo derecho o A .. Clic con el puntero.   Stick der. arriba/abajo .. Desplazar.
 
