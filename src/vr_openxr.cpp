@@ -11832,15 +11832,10 @@ static void vrMaskOriginalWearableHudOnGui()
         // centre, and this head-locked GUI layer is centred on the view, so
         // the icon/text lands exactly where the player is looking. The
         // frame's own size is only an anchor; its text extends around it.
-        {
-            Frame* tooltip = players[clientnum]->hud.worldTooltipFrame;
-            if (!g_vrPromptPanelActive && tooltip && !tooltip->isDisabled() && !tooltip->isInvisible())
-            {
-                const SDL_Rect anchor = tooltip->getAbsoluteSize();
-                keepRects.push_back({ anchor.x - 260, anchor.y - 90,
-                    anchor.w + 520, anchor.h + 200 });
-            }
-        }
+        // ZF26: no longer kept. The mod draws the prompt on its own panel; when
+        // that panel was briefly off, this generous rectangle around Barony's
+        // tooltip anchor showed whatever was under it on the head-locked
+        // layer, often the hotbar ("the prompt turned into my hotbar").
         // ZF8: hotbar and dungeon messages stay at the bottom of the
         // view (this layer follows the head), replacing the belt surface.
         // Health/mana, status effects and the minimap remain on the arms.
@@ -16427,12 +16422,21 @@ static void vrUpdatePromptPanel()
     const Uint32 now = SDL_GetTicks();
     Entity* tip = player.worldUI.uidForActiveTooltip ?
         uidToEntity(player.worldUI.uidForActiveTooltip) : nullptr;
-    if (tip && !player.worldUI.interactText.empty())
+    // ZF26: after using a lever and walking away, Barony can show its tooltip
+    // again while interactText is still empty; use the tooltip's own text then
+    // instead of hiding the prompt.
+    std::string promptText = player.worldUI.interactText;
+    if (tip && promptText.empty())
+        if (Frame* frame = player.hud.worldTooltipFrame)
+            if (!frame->isDisabled() && !frame->isInvisible())
+                if (Field* field = frame->findField("prompt text"))
+                    if (field->getText() && field->getText()[0]) promptText = field->getText();
+    if (tip && !promptText.empty())
     {
         g_vrPromptVisible = true;
         lastSeen = now;
         lastUid = player.worldUI.uidForActiveTooltip;
-        lastText = player.worldUI.interactText;
+        lastText = promptText;
     }
     else if (wasVisible && lastUid && now - lastSeen < 300)
         tip = uidToEntity(lastUid); // bridge single-frame gaps: no blinking
