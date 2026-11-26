@@ -59,3 +59,5 @@ Ajustes en vr_settings.cfg (carpeta de Barony):
   hotbar=view | belt      wrist_ui=look | always      xr_runtime=auto | active | steamvr
   combat=button | gesture      wrist_render=world | layer
   debug_dump=2  (guarda capturas en la carpeta vr_debug cada 2 s; 0 = apagado)
+  thumbrest_dpad=0  (1 = apoyar el pulgar derecho en el reposapulgar convierte el
+                     stick izquierdo en cruceta; apagado por defecto)

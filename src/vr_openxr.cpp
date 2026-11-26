@@ -861,6 +861,7 @@ static bool vrHotbarAtViewBottom() { return g_vrHotbarAtViewBottom; }
 // two-hand bow only exist on the host (a client's attack needs a validated
 // packet), and other players never see the gesture, so they are opt-in.
 static bool g_vrGestureCombat = false;
+static bool g_vrThumbrestDpad = false; // ZF25: thumbrest_dpad=1 enables the GA21 D-pad mode
 // ZF23: wrist_render=world (default, drawn inside each eye image) or layer
 // (OpenXR quad layer, as before).
 static bool g_vrWristRenderWorld = true;
@@ -902,6 +903,10 @@ static void vrReadFeatureSettings()
             g_vrHotbarAtViewBottom = true;
         else if (std::strncmp(line, "combat=gesture", 14) == 0)
             g_vrGestureCombat = true;
+        else if (std::strncmp(line, "thumbrest_dpad=1", 16) == 0)
+            g_vrThumbrestDpad = true;
+        else if (std::strncmp(line, "thumbrest_dpad=0", 16) == 0)
+            g_vrThumbrestDpad = false;
         else if (std::strncmp(line, "wrist_render=layer", 18) == 0)
             g_vrWristRenderWorld = false;
         else if (std::strncmp(line, "wrist_render=world", 18) == 0)
@@ -969,7 +974,10 @@ static void vrSaveModeSettings()
             "# debug_dump: seconds between captures in vr_debug/ (0 = off).\n"
             "debug_dump=%g\n"
             "# wrist_render: world (drawn in the 3D image) or layer (overlay).\n"
-            "wrist_render=%s\n",
+            "wrist_render=%s\n"
+            "# thumbrest_dpad: 1 = resting the right thumb on the thumbrest turns the\n"
+            "# left stick into a D-pad (no walking); 0 = off.\n"
+            "thumbrest_dpad=%d\n",
             g_vrUserEnabled ? 1 : 0, g_vrFlailVisualEnabled ? 1 : 0,
             g_vrFlailAnchorForward, g_vrFlailAnchorUp,
             g_vrFlailChainLength, g_vrFlailAnchorSide, g_vrFlailDamping,
@@ -981,7 +989,8 @@ static void vrSaveModeSettings()
             g_vrWristUiOnLook ? "look" : "always",
             g_vrGestureCombat ? "gesture" : "button",
             static_cast<double>(vrDebugDumpIntervalSeconds()),
-            g_vrWristRenderWorld ? "world" : "layer");
+            g_vrWristRenderWorld ? "world" : "layer",
+            g_vrThumbrestDpad ? 1 : 0);
         std::fclose(file);
         g_vrFlailSettingsDirty = false;
     }
@@ -1372,6 +1381,15 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     const bool primaryPressed = right.primaryButton || right.trigger >= 0.65f ||
         testLobbyAFrames > 0;
     if (testLobbyAFrames > 0) --testLobbyAFrames;
+    {
+        static bool primaryWas = false;
+        if (primaryPressed != primaryWas && intro)
+            printlog("[VR ZF25] menu primary %s: present=%d valid=%d pointerMode=%d awaiting=%d focused=%d actions=%d calib=%d",
+                primaryPressed ? "DOWN" : "UP", menuPresent ? 1 : 0, validInput ? 1 : 0, vrMenuPointerMode() ? 1 : 0,
+                awaitingLogin ? 1 : 0, g_xrSessionState == XR_SESSION_STATE_FOCUSED ? 1 : 0,
+                g_xrControllerActionsAttached ? 1 : 0, g_vrArmCalibrationActive ? 1 : 0);
+        primaryWas = primaryPressed;
+    }
     const bool lobbyLoginDown = menuPresent && primaryPressed &&
         (lobbyLoginWasDown || awaitingLogin);
     // ZF19: inject Barony's controller sign-in action directly instead of a
@@ -6192,8 +6210,10 @@ static void vrTestFakeHandPose(int handIndex, XrTime time, VrControllerHandState
         const char* v = std::getenv("BARONYVR_TEST_FAKE_HANDS");
         return v && v[0] == '1';
     }();
-    // Menus stay mouse-driven in tests: a fake ray would own the mouse.
-    if (!enabled || intro || state.gripPoseValid || g_xrGuiViewSpace == XR_NULL_HANDLE) return;
+    // Menus stay mouse-driven in tests (a fake ray would own the mouse) unless
+    // the input file gives this hand an explicit pose (ZF25: lobby ray tests).
+    if (!enabled || (intro && !g_vrTestInput[handIndex].hasPose) || state.gripPoseValid ||
+        g_xrGuiViewSpace == XR_NULL_HANDLE) return;
     float p[6] = { -0.10f, -0.22f, -0.30f, -90.f, 0.f, -60.f }; // left: looking at the watch
     if (handIndex == 1) { p[0] = 0.18f; p[1] = -0.35f; p[2] = -0.35f; p[3] = 0.f; p[4] = -20.f; p[5] = 0.f; }
     if (const char* v = std::getenv(handIndex ? "BARONYVR_TEST_RIGHT_HAND" : "BARONYVR_TEST_LEFT_HAND"))
@@ -6336,7 +6356,10 @@ static void vrUpdateControllerInputs(XrTime predictedDisplayTime)
             XrActionStateBoolean restState{};restState.type=XR_TYPE_ACTION_STATE_BOOLEAN;
             if(XR_SUCCEEDED(xrGetActionStateBoolean(g_xrSession,&restInfo,&restState))) {
                 state.thumbrestAvailable=restState.isActive==XR_TRUE;
-                state.thumbrestTouch=state.thumbrestAvailable && restState.currentState==XR_TRUE;
+                // ZF25: the GA21 thumbrest D-pad mode is opt-in (thumbrest_dpad=1):
+                // resting the thumb there turned the left stick into a D-pad (no
+                // walking) and switched off trigger clicks and lobby join in menus.
+                state.thumbrestTouch=state.thumbrestAvailable && restState.currentState==XR_TRUE && g_vrThumbrestDpad;
             }
         }
         state.primaryButton = readButton(handIndex == 0 ?
@@ -16255,7 +16278,7 @@ static void vrUpdateMessagePanel()
         if (!field || field->isDisabled() || field->isInvisible() || !field->getText() || !field->getText()[0])
             continue;
         Uint8 r = 0, g = 0, b = 0, a = 0;
-        getColor(field->getTextColor(), &r, &g, &b, &a);
+        getColor(field->getColor(), &r, &g, &b, &a);
         if (!a) continue;
         lines.push_back({ field->getAbsoluteSize().y, field });
     }
@@ -16281,7 +16304,13 @@ static void vrUpdateMessagePanel()
                 const int dw = static_cast<int>(tw * s), dh = static_cast<int>(th * s);
                 y -= dh + 2;
                 if (y < 0) break;
-                t->draw(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ (W - dw) / 2, y, dw, dh }, viewport);
+                // ZF25: Barony tints each message line with the field colour (the
+                // wizard's purple...) and fades it with the frame opacity.
+                Uint8 cr = 255, cg = 255, cb = 255, ca = 255;
+                getColor(f->getColor(), &cr, &cg, &cb, &ca);
+                ca = static_cast<Uint8>(ca * std::max(0.0, std::min(100.0, static_cast<double>(box->getOpacity()))) / 100.0);
+                t->drawColor(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ (W - dw) / 2, y, dw, dh }, viewport,
+                    makeColor(cr, cg, cb, ca));
             }
         }))
         return;
