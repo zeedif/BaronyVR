@@ -1672,8 +1672,8 @@ void glDrawEnemyBarSprite(view_t* camera, int mode, int playerViewport, void* en
     v = vec4((float)enemybar->worldX * 2.f, -height * 2.f, (float)enemybar->worldY * 2.f, 0.f);
     (void)translate_mat(&t, &m, &v); m = t;
     mat4x4_t i;
-    (void)rotate_mat(&t, &m, -90.f - camera->ang * (180.f / PI), &i.y); m = t;
-    (void)rotate_mat(&t, &m, -camera->vang * (180.f / PI), &i.x); m = t;
+    (void)rotate_mat(&t, &m, -90.f - (camera->ang - (vrCameraTrackingEnabled ? vrHeadYaw : 0.f)) * (180.f / PI), &i.y); m = t;
+    (void)rotate_mat(&t, &m, -(camera->vang - (vrCameraTrackingEnabled ? vrHeadPitch : 0.f)) * (180.f / PI), &i.x); m = t;
     float scale = 0.08;
     scale += (0.05f * ((*MainMenu::cvar_enemybar_scale / 100.f) - 1.f));
     v = vec4(scale * tex->w, scale * tex->h, scale * enemybar->screenDistance, 0.f);
@@ -1800,8 +1800,8 @@ void glDrawWorldDialogueSprite(view_t* camera, void* worldDialogue, int mode)
     // model matrix
     v = vec4(dialogue->x * 2, -(dialogue->z + dialogue->animZ) * 2 - 1, dialogue->y * 2, 0.f);
     (void)translate_mat(&m, &t, &v); t = m;
-    (void)rotate_mat(&m, &t, -90.f - camera->ang * (180.f / PI), &i.y); t = m;
-    (void)rotate_mat(&m, &t, -camera->vang * (180.f / PI), &i.x); t = m;
+    (void)rotate_mat(&m, &t, -90.f - (camera->ang - (vrCameraTrackingEnabled ? vrHeadYaw : 0.f)) * (180.f / PI), &i.y); t = m;
+    (void)rotate_mat(&m, &t, -(camera->vang - (vrCameraTrackingEnabled ? vrHeadPitch : 0.f)) * (180.f / PI), &i.x); t = m;
     v = vec4(scale * tex->w, scale * tex->h, scale, 0.f);
     (void)scale_mat(&m, &t, &v); t = m;
     
@@ -1974,8 +1974,8 @@ void glDrawWorldUISprite(view_t* camera, Entity* entity, int mode)
     // model matrix
     v = vec4(entity->x * 2, -(entity->z + zOffset) * 2 - 1, entity->y * 2, 0.f);
     (void)translate_mat(&m, &t, &v); t = m;
-    (void)rotate_mat(&m, &t, -90.f - camera->ang * (180.f / PI), &i.y); t = m;
-    (void)rotate_mat(&m, &t, -camera->vang * (180.f / PI), &i.x); t = m;
+    (void)rotate_mat(&m, &t, -90.f - (camera->ang - (vrCameraTrackingEnabled ? vrHeadYaw : 0.f)) * (180.f / PI), &i.y); t = m;
+    (void)rotate_mat(&m, &t, -(camera->vang - (vrCameraTrackingEnabled ? vrHeadPitch : 0.f)) * (180.f / PI), &i.x); t = m;
     v = vec4((entity->scalex + scale) * tex->w, (entity->scalez + scale) * tex->h, (entity->scalez + scale), 0.f);
     (void)scale_mat(&m, &t, &v); t = m;
     GL_CHECK_ERR(glUniformMatrix4fv(shader.uniform("uModel"), 1, false, (float*)&m)); // model matrix
