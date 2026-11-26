@@ -26,6 +26,7 @@ Based on upstream `release/v1.0.2`. Changes are tagged `ZFn` in `src/vr_openxr.c
 | ZF19 | VR actions were faked as keyboard/gamepad presses (Space login dropped the controller). | `Input::update()` ORs device-independent VR actions into named bindings (`g_vrActionHook`); Use, Cast Spell, Hotbar Up / Select, Interact Tooltip Next, Call Out, Show NPC Commands and GamepadLoginA are injected by name. Stick clicks cycle interactions when one is in reach, otherwise L3 Call Out / R3 NPC commands; prompt shows L3/R3 glyphs. |
 | ZF20 | B could not close the assist shrine (or other windows) once the VR pad was the player's controller: Barony maps Escape to "close windows" only for keyboard players and pauses otherwise. No feedback for charging, striking or blocking (tracked arms skip Barony's animations). Wrist panel sometimes cut off. | In game B injects the native `Pause Game` action (closeAllGUIs with a window open); Escape is kept for title/pause/game-over menus; the B press that closes a window cannot also cast. Haptics: charge start/full, recognised melee swing, trigger attack/use, shield raised, timed block; block/charge cue drawn 2.5x. Wrist panel kept at least 0.30 m from the eyes (a close wrist put it inside the near plane). |
 | ZF21 | Attacking with the trigger only charged (the hit was an arm swing, host-only: a client's attack needs a validated packet, and nobody else sees the gesture); weak repeated attacks on a trigger are tiring. In the lobby, once the card was signed in, the laser stopped reaching it and B sent Escape. | `combat=button` (default): A = injected `Attack` (native hold-to-charge, release-to-strike, works for clients), X = `Defend` + `Sneak`, both triggers = `Use`; charge cue + haptics read the HUD weapon's native charge. `combat=gesture` keeps the physical swing / two-hand bow. Signed-in lobby card: trigger = injected `MenuConfirm` (after the sign-in press is released), B = `MenuCancel`, no Escape, no laser click. |
+| ZF22 | Buttons for attack/defend were uncomfortable; attacks went where Barony's body yaw faced (head turns never turn the body); the hotbar followed every head turn and could be pointed at (and scrolled) with an arm hanging down; wrist panel sometimes showed only its buttons. | Ambidextrous button combat: right trigger = Attack, left trigger = Defend/Sneak, A or X = Use, B or Y = Cast Spell / back. Attack direction = right controller yaw: local melee trace and projectiles (`vrLocalAttackAimYaw`); a VR client appends "VR"+yaw16 to its ATAK packet and a BaronyVR host applies it to that client's melee trace and arrows/thrown items (vanilla peers ignore the extra bytes). Hotbar: re-centres only after >55° for 1 s and never while in view, position follows slowly, rays only while it is in view. Wrist panel draws HP/MP bars from stats and a text "MENU" label instead of copying Barony's HUD frames. Lessons from Team Beef, Quake VR, OpenMW-VR and Vivecraft in the research notes below. |
 | ZF4 | No way to see what the headset shows without wearing it. | `BARONYVR_DEBUG_DUMP=<seconds>` writes `vr_debug/eye_NNN.bmp` (left eye), `vr_debug/gui_NNN.bmp` (GUI panel, magenta = transparent) and `vr_debug/state.txt` (session/menu/panel pose) next to `log.txt`. |
 
 ## Headset-free test setup (used for this branch)
@@ -61,3 +62,24 @@ generated from retail `fmod.dll`; nativefiledialog built from source. Configure 
   announced BaronyVR; vanilla peers ignore unknown packets) so remote players see
   VR arm gestures.
 - More controller profiles (Index, Vive, WMR) for SteamVR users.
+
+## Research notes: input in open-source VR ports (2026-11)
+
+- Team Beef (QuestZDoom, Lambda1VR, RTCWQuest, JKXR): dominant trigger fires,
+  A uses; buttons become engine keys (rebindable); `vr_control_scheme` /
+  `vr_switch_sticks` for left-handers; weapon aim from the controller quaternion
+  rotated by `viewYaw - hmdYaw`; Lambda1VR melee is physical in single player
+  and a trigger press in multiplayer.
+- Quake VR (vittorioromeo): controller buttons are bindable Quake keys; clients
+  send head/hand poses in move packets, the server judges melee, the client owns
+  aim; remote players are yawed by their main-hand aim. Older Quakespasm VR has
+  aim modes with a yaw deadzone before the body turns.
+- OpenMW-VR: speed-gated "realistic combat" state machine; bows/spells aimed
+  along the hand; the UI pointer disables combat while active; OpenXR actions
+  rebindable in game.
+- Vivecraft: every keybind is a SteamVR action, switched by context action sets
+  (in game / GUI / keyboard); HUD on wrist, hand or head; server plugin syncs
+  poses and fixes VR projectiles.
+- Next for BaronyVR: a real "VR" device type in Barony's Input bindings
+  (rebindable in the controls menu, handedness option), and a pose packet so
+  remote players face their weapon hand.

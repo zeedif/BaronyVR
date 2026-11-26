@@ -8557,6 +8557,15 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 				}
 			}
 			int pose = net_packet->data[5];
+#if defined(_WIN32) && !defined(EDITOR)
+			// ZF22: optional VR weapon-hand yaw from a BaronyVR client.
+			extern void vrSetRemoteAttackAim(int playerIndex, bool active, real_t yaw);
+			const bool vrAim = net_packet->len >= 19 && net_packet->data[15] == 'V' && net_packet->data[16] == 'R';
+			if ( vrAim )
+			{
+				vrSetRemoteAttackAim(player, true, SDLNet_Read16(&net_packet->data[17]) / 65536.0 * 2.0 * PI);
+			}
+#endif
 			if ( pose == PLAYER_POSE_GOLEM_SMASH )
 			{
 				Item* tmp = stats[player]->weapon;
@@ -8568,6 +8577,12 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			{
 				players[player]->entity->attack(pose, net_packet->data[6], nullptr);
 			}
+#if defined(_WIN32) && !defined(EDITOR)
+			if ( vrAim )
+			{
+				vrSetRemoteAttackAim(player, false, 0.0);
+			}
+#endif
 		}
 	}},
 

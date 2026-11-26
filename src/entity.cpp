@@ -10964,7 +10964,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 				}
 
 				#if defined(_WIN32) && !defined(EDITOR) // STEP600_CONTROLLER_AIM_ENTITY_HOOK
-				if ( behavior == &actPlayer && player == clientnum )
+				if ( behavior == &actPlayer && player >= 0 ) // ZF22: remote VR aim too
 				{
 				    extern bool vrApplyControllerRangedAim(int playerIndex, Entity* projectile);
 				    vrApplyControllerRangedAim(player, entity);
@@ -11262,7 +11262,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 				// real projectile to the Quest right-controller AIM direction.
 				// Guard non-Windows/editor builds; preserve monsters and remote PCs.
 #if defined(_WIN32) && !defined(EDITOR)
-				if ( entity && behavior == &actPlayer && player == clientnum )
+				if ( entity && behavior == &actPlayer && player >= 0 ) // ZF22: remote VR aim too
 				{
 					extern bool vrApplyControllerThrownAim(int playerIndex, Entity* projectile);
 					vrApplyControllerThrownAim(player, entity);
@@ -11312,7 +11312,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 		// target pointers, or change weapon reach, wall tests or shield rules.
 		real_t meleeTraceYaw = yaw;
 #if defined(_WIN32) && !defined(EDITOR)
-		if ( player == clientnum && player >= 0 && target == nullptr &&
+		if ( player >= 0 && target == nullptr && // ZF22: remote VR clients too
 			behavior == &actPlayer )
 		{
 			extern bool vrGetPhysicalMeleeTraceYaw(int playerIndex, real_t* outYaw);
@@ -16992,6 +16992,23 @@ void Entity::attack(int pose, int charge, Entity* target)
 		net_packet->address.host = net_server.host;
 		net_packet->address.port = net_server.port;
 		net_packet->len = 15;
+#if defined(_WIN32) && !defined(EDITOR)
+		{
+			// ZF22: a VR client tells the host where its weapon hand points
+			// ("VR" + yaw in 1/65536 turns). Vanilla hosts read 15 bytes only.
+			extern bool vrLocalAttackAimYaw(real_t* outYaw);
+			real_t aimYaw = 0.0;
+			if ( player == clientnum && vrLocalAttackAimYaw(&aimYaw) )
+			{
+				real_t turns = aimYaw / (2.0 * PI);
+				turns -= floor(turns);
+				net_packet->data[15] = 'V';
+				net_packet->data[16] = 'R';
+				SDLNet_Write16(static_cast<Uint16>(turns * 65536.0) , &net_packet->data[17]);
+				net_packet->len = 19;
+			}
+		}
+#endif
 		sendPacketSafe(net_sock, -1, net_packet, 0);
 	}
 }

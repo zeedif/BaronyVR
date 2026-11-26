@@ -9,18 +9,17 @@ Instalacion manual: copia la carpeta "BaronyVR" de este zip dentro de
 %LOCALAPPDATA% (pega %LOCALAPPDATA% en la barra del Explorador) y acepta reemplazar.
 Para volver a la version oficial: descarga de nuevo la release 1.0.2 y ejecuta su Setup.cmd.
 
-CONTROLES EN PARTIDA (mandos Quest)
-  Gatillos (cualquiera) Usar / interactuar: puertas, palancas, objetos, cofres,
-                         hablar... Nunca atacan.
-  Gatillo (apuntando
-   al hotbar) .......... Equipa esa casilla (vale con cualquier mano)
-  A .................... Atacar, con cualquier arma (igual que el gatillo de un
-                         mando): mantener = cargar un golpe fuerte (la mira se
-                         llena y vibra al llegar al maximo), soltar = golpear.
-  X .................... Defender con escudo (mira azul grande, vibra al subir el
+CONTROLES EN PARTIDA (mandos Quest, ambidiestro)
+  Gatillo derecho ...... Atacar con el arma (mantener = cargar golpe fuerte, la mira
+                         se llena y vibra al maximo; soltar = golpear). El golpe,
+                         las flechas y lo que lanzas salen hacia donde APUNTA el
+                         mando derecho, no hacia donde mira el cuerpo.
+  Gatillo izquierdo .... Defender con escudo (mira azul grande, vibra al subir el
                          escudo y fuerte en un bloqueo a tiempo). Sin escudo: sigilo.
-  B .................... Lanzar hechizo
-  Y .................... Libre
+  Gatillo (apuntando
+   al hotbar) .......... Equipa esa casilla. Solo cuando el hotbar esta a la vista.
+  A o X ................ Usar / interactuar: puertas, palancas, objetos, cofres...
+  B o Y ................ Lanzar hechizo
   Clic de un stick ..... Con una interaccion al alcance: siguiente interaccion.
                          Sin ninguna: stick izq. = gestos (Call Out, tecla X),
                          stick der. = ordenes a aliados (tecla C).
@@ -32,14 +31,14 @@ CONTROLES EN PARTIDA (mandos Quest)
    arco con las dos manos; solo funciona si eres el anfitrion o juegas solo.)
 
 CON VENTANAS ABIERTAS (inventario, hechizos, cofre, tienda, altar, mapa, pausa...)
-  B .................... Cerrar / atras (en el menu de pausa: volver al juego)
+  B o Y ................ Cerrar / atras (en el menu de pausa: volver al juego)
   Gatillo derecho o A .. Clic con el puntero.   Stick der. arriba/abajo .. Desplazar.
 
 MENUS DE INICIO Y LOBBY
   Gatillo derecho o A .. Pulsar botones, unirse a la partida.
   En tu tarjeta del lobby (personaje, clase, "Todo a punto"): Barony la maneja
   como un mando, sin puntero. Stick izquierdo = moverte entre opciones,
-  gatillo derecho o A = aceptar, B = atras / quitar "Todo a punto".
+  gatillo derecho o A = aceptar, B o Y = atras / quitar "Todo a punto".
 
 MUNECA (estilo Demeo)
   Lleva una muneca cerca de la cara girandola hacia ti (gesto de mirar un reloj).
@@ -48,8 +47,8 @@ MUNECA (estilo Demeo)
   mano sobre el panel) y pulsa su gatillo o A/X. Con los brazos extendidos no sale.
 
 INTERFAZ
-  - Hotbar y mensajes: debajo de la vista, fijos al cuerpo; baja la mirada para
-    verlos. Siguen el giro solo cuando te giras mas de ~35 grados.
+  - Hotbar y mensajes: debajo de la vista, como un cinturon; baja la mirada para
+    verlos. Solo se recoloca si te giras mas de ~55 grados durante 1 s.
   - Avisos de interaccion: flotan junto al objeto que vas a usar (elegido por
     donde miras), a la altura de los ojos.
   - Cofres, tiendas y mesas de trabajo abren su ventana hacia el objeto.

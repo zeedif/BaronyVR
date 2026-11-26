@@ -798,6 +798,10 @@ static const std::vector<std::string> g_vrActionNames = {
 // ZF21: A/X pressed on a menu stay "menu" until released (no attack/defend
 // when the window closes under the finger).
 static bool g_vrPrimaryHeldFromMenu[2] = {};
+// ZF22: a trigger pulled in a menu does not attack/defend until released;
+// a trigger pulled while its ray is on a hotbar slot equips (set last frame).
+static bool g_vrTriggerHeldFromMenu[2] = {};
+static bool g_vrHotbarHoverHand[2] = {};
 // ZF20: B pressed to close a window stays "menu" until released, so the same
 // press cannot cast a spell once the window is gone and shootmode returns.
 static bool g_vrBackHeldFromMenu = false;
@@ -1341,7 +1345,7 @@ static void vrUpdateMenuNavigation(bool validInput = true)
 
     // ZF17: B is "back / close" in every menu again (inventory, chests,
     // pause menu...); X and Y are free, the wrist panel opens windows.
-    const bool menuBackDown = right.secondaryButton;
+    const bool menuBackDown = right.secondaryButton || (g_xrControllerHands[0].secondaryButton && !g_xrControllerHands[0].primaryButton); // ZF22: B or Y
     if (menuBackDown) g_vrBackHeldFromMenu = true;
     // ZF21: a signed-in lobby card only listens to menu actions: trigger =
     // MenuConfirm (A already is, through the VR pad), B = MenuCancel (back /
@@ -4141,6 +4145,8 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     {
         if (right.primaryButton) g_vrPrimaryHeldFromMenu[1] = true;
         if (left.primaryButton) g_vrPrimaryHeldFromMenu[0] = true;
+        for (int h = 0; h < 2; ++h)
+            if (g_xrControllerHands[h].trigger >= 0.65f) g_vrTriggerHeldFromMenu[h] = true;
         // STEP 624: Restore native Xbox-style focus/confirm ONLY in Barony's
         // character creation lobby. Shrines, inventory, chests and every other
         // pointer-driven UI retain Step623's neutral virtual gamepad behavior.
@@ -4248,11 +4254,13 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
           (isMeleeWeapon(*stats[clientnum]->weapon) ||
            stats[clientnum]->weapon->type == TOOL_PICKAXE ||
            stats[clientnum]->weapon->type == TOOL_WHIP)));
-    // ZF13/ZF21: the triggers are the VR "interact" fingers. combat=button:
-    // either trigger is Use (doors, levers, items, NPCs...) and never attacks.
-    // combat=gesture: right trigger is Use only while a prompt shows.
-    // The hand menu / hotbar own a trigger while its ray points at them.
+    // ZF22 combat=button, ambidextrous: each trigger is its arm's combat
+    // action (right = Attack: hold to charge, release to strike; left =
+    // Defend / Sneak), A or X = Use, B or Y = Cast Spell / back in windows.
+    // A trigger pull is decided on its press: aimed at the hotbar or the
+    // wrist panel it belongs to them, still held from a menu it does nothing.
     static bool triggerUseLatched[2] = {}, triggerWasDown[2] = {};
+    static bool triggerCombat[2] = {};
     for (int h = 0; h < 2; ++h)
     {
         const VrControllerHandState& hand = h ? right : left;
@@ -4261,14 +4269,24 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
             (g_vrHandMenuOwnsLeft || g_vrHotbarOwnsTrigger[0]);
         if (down && !triggerWasDown[h])
         {
-            triggerUseLatched[h] = !vrMenuPointerMode() && !owned && !bowControls &&
-                (buttonCombat ? true : (h == 1 && g_vrPromptVisible));
+            const bool free = !vrMenuPointerMode() && !owned && !g_vrHotbarHoverHand[h] &&
+                !g_vrTriggerHeldFromMenu[h] && !bowControls;
+            triggerUseLatched[h] = free && !buttonCombat && h == 1 && g_vrPromptVisible;
+            triggerCombat[h] = free && buttonCombat;
             if (triggerUseLatched[h]) vrHaptic(h, 0.3f, 20);
+            else if (triggerCombat[h]) vrHaptic(h, 0.35f, 20);
             else if (h == 1 && !buttonCombat && !physicalMeleeOwnsAttack && !bowControls &&
                 !vrMenuPointerMode() && !owned && !g_xrVrPointerActive)
                 vrHaptic(1, 0.45f, 30);
         }
-        if (hand.trigger < 0.3f) triggerUseLatched[h] = false;
+        if (hand.trigger < 0.3f)
+        {
+            if (triggerCombat[h] && h == 1) vrHaptic(1, 0.6f, 35); // strike released
+            triggerUseLatched[h] = false;
+            triggerCombat[h] = false;
+            g_vrTriggerHeldFromMenu[h] = false;
+        }
+        if (owned || vrMenuPointerMode()) triggerCombat[h] = false;
         triggerWasDown[h] = down;
     }
     const bool triggerUse = triggerUseLatched[0] || triggerUseLatched[1];
@@ -4340,30 +4358,26 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         vrAction("Show NPC Commands", rightTap);
     }
     (void)bowOwnsRightGrip;
-    // ZF21 combat=button: A = Attack (hold to charge, release to strike, the
-    // native path, so it works the same for clients and is seen by everyone),
-    // X = Defend / Sneak (Barony shares them like the gamepad left trigger).
-    // A or X still held from a menu click does not attack/defend.
-    if (!right.primaryButton) g_vrPrimaryHeldFromMenu[1] = false;
-    if (!left.primaryButton) g_vrPrimaryHeldFromMenu[0] = false;
-    const bool attackDown = buttonCombat && right.primaryButton && !g_vrPrimaryHeldFromMenu[1] &&
-        !g_vrHandMenuOwnsRight;
-    const bool defendDown = buttonCombat && left.primaryButton && !left.secondaryButton &&
-        !g_vrPrimaryHeldFromMenu[0] && !g_vrHandMenuOwnsLeft;
+    // ZF22 (see the trigger block above). A/X/B/Y still held from a menu
+    // click do nothing until released.
+    for (int h = 0; h < 2; ++h)
     {
-        static bool attackWas = false, defendWas = false;
-        if (attackDown && !attackWas) vrHaptic(1, 0.35f, 20);
-        if (!attackDown && attackWas) vrHaptic(1, 0.6f, 35);
-        attackWas = attackDown;
-        (void)defendWas; // the shield-raised pulse lives in vrUpdateExtraPanels
+        const VrControllerHandState& hand = h ? right : left;
+        if (!hand.primaryButton) g_vrPrimaryHeldFromMenu[h] = false;
     }
+    const bool xyChord = left.primaryButton && left.secondaryButton; // arm calibration
+    const bool attackDown = buttonCombat && triggerCombat[1];
+    const bool defendDown = buttonCombat && triggerCombat[0];
+    const bool useButton = (right.primaryButton && !g_vrPrimaryHeldFromMenu[1] && !g_vrHandMenuOwnsRight) ||
+        (left.primaryButton && !xyChord && !g_vrPrimaryHeldFromMenu[0] && !g_vrHandMenuOwnsLeft);
     vrAction("Attack", attackDown);
     vrAction("Defend", defendDown);
     vrAction("Sneak", defendDown);
-    vrAction("Use", ((!buttonCombat && right.primaryButton) || triggerUse) && !g_vrHandMenuOwnsRight);
+    vrAction("Use", useButton || triggerUse);
     vrAction("Hotbar Up / Select", static_cast<Sint32>(g_vrHotbarEquipPulseUntil - tapNow) > 0);
-    if (!right.secondaryButton) g_vrBackHeldFromMenu = false;
-    vrAction("Cast Spell", !bowControls && right.secondaryButton && !g_vrBackHeldFromMenu &&
+    const bool spellButton = right.secondaryButton || (left.secondaryButton && !xyChord);
+    if (!spellButton) g_vrBackHeldFromMenu = false;
+    vrAction("Cast Spell", !bowControls && spellButton && !g_vrBackHeldFromMenu &&
         !g_vrMeleeExitGripsSuppressed);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_X, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_Y, false);
@@ -9329,8 +9343,10 @@ bool vrTickHeldWorldItem(Entity* e) {
 
 // Called ONLY from Barony's ranged-projectile creation hook. Non-VR and
 // non-local projectiles retain all original gameplay code unchanged.
+static bool vrApplyRemoteProjectileAim(int playerIndex, Entity* projectile);
 bool vrApplyControllerRangedAim(int playerIndex, Entity* projectile)
 {
+    if (projectile && playerIndex != clientnum) return vrApplyRemoteProjectileAim(playerIndex, projectile); // ZF22
     if (!projectile || playerIndex != clientnum || multiplayer == CLIENT)
         return false; // Networking synchronization is a future milestone.
     VrWorldAimRay aim{};
@@ -9379,6 +9395,8 @@ bool vrApplyControllerRangedAim(int playerIndex, Entity* projectile)
 // network aim packet and is deliberately left on its vanilla path.
 bool vrApplyControllerThrownAim(int playerIndex, Entity* projectile)
 {
+    if (projectile && playerIndex != clientnum && projectile->behavior == &actThrown)
+        return vrApplyRemoteProjectileAim(playerIndex, projectile); // ZF22
     if (!projectile || playerIndex != clientnum || multiplayer == CLIENT ||
         projectile->behavior != &actThrown ||
         playerIndex < 0 || playerIndex >= MAXPLAYERS ||
@@ -13621,15 +13639,72 @@ static ConsoleVariable<bool> cvarVRSwingTraceAim("/vr_melee_swing_aim", true);
 static bool g_vrSwingTraceAimActive = false;
 static real_t g_vrSwingTraceYaw = 0;
 
+// ZF22: attacks go where the weapon hand points, not where Barony's body
+// yaw faces (turning the head never turns the body). Local attacks read the
+// right controller; a VR client appends that yaw to its ATAK packet and the
+// host applies it while it runs that client's attack (melee trace and the
+// horizontal direction of arrows / thrown items). Vanilla peers ignore the
+// extra bytes and keep the body direction.
+static bool g_vrRemoteAimActive[MAXPLAYERS] = {};
+static real_t g_vrRemoteAimYaw[MAXPLAYERS] = {};
+
+bool vrLocalAttackAimYaw(real_t* outYaw)
+{
+    if (!outYaw || !g_xrSessionRunning || g_xrSessionState != XR_SESSION_STATE_FOCUSED ||
+        clientnum < 0 || clientnum >= MAXPLAYERS)
+        return false;
+    if (g_vrSwingTraceAimActive && *cvarVRSwingTraceAim)
+    {
+        *outYaw = g_vrSwingTraceYaw;
+        return true;
+    }
+    VrWorldAimRay aim{};
+    if (!vrBuildControllerWorldAim(&cameras[clientnum], aim, false, false, false))
+        return false;
+    if (hypotf(aim.forward.x, aim.forward.z) < 0.05f) return false; // pointing straight up/down
+    *outYaw = static_cast<real_t>(atan2f(aim.forward.z, aim.forward.x));
+    return true;
+}
+
+void vrSetRemoteAttackAim(int playerIndex, bool active, real_t yaw)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS) return;
+    g_vrRemoteAimActive[playerIndex] = active;
+    g_vrRemoteAimYaw[playerIndex] = yaw;
+}
+
+// Rotate a freshly spawned projectile of a remote VR player about the
+// shooter so it leaves toward the yaw that player's controller pointed at.
+static bool vrApplyRemoteProjectileAim(int playerIndex, Entity* projectile)
+{
+    if (!projectile || playerIndex < 0 || playerIndex >= MAXPLAYERS ||
+        !g_vrRemoteAimActive[playerIndex] || !players[playerIndex] || !players[playerIndex]->entity)
+        return false;
+    Entity* shooter = players[playerIndex]->entity;
+    const real_t d = g_vrRemoteAimYaw[playerIndex] - shooter->yaw;
+    const real_t c = cos(d), s = sin(d);
+    const real_t ox = projectile->x - shooter->x, oy = projectile->y - shooter->y;
+    projectile->x = shooter->x + ox * c - oy * s;
+    projectile->y = shooter->y + ox * s + oy * c;
+    const real_t vx = projectile->vel_x, vy = projectile->vel_y;
+    projectile->vel_x = vx * c - vy * s;
+    projectile->vel_y = vx * s + vy * c;
+    projectile->yaw += d;
+    return true;
+}
+
 bool vrGetPhysicalMeleeTraceYaw(int playerIndex, real_t* outYaw)
 {
-    if (!outYaw || !*cvarVRSwingTraceAim || !g_vrSwingTraceAimActive ||
-        !g_xrSessionRunning || g_xrSessionState != XR_SESSION_STATE_FOCUSED ||
-        multiplayer == CLIENT || playerIndex != clientnum ||
-        playerIndex < 0 || playerIndex >= MAXPLAYERS)
+    if (!outYaw || playerIndex < 0 || playerIndex >= MAXPLAYERS)
         return false;
-    *outYaw = g_vrSwingTraceYaw;
-    return true;
+    if (playerIndex != clientnum)
+    {
+        if (!g_vrRemoteAimActive[playerIndex]) return false;
+        *outYaw = g_vrRemoteAimYaw[playerIndex];
+        return true;
+    }
+    if (multiplayer == CLIENT) return false;
+    return vrLocalAttackAimYaw(outYaw);
 }
 
 static void vrProcessPhysicalMelee(XrTime predictedDisplayTime)
@@ -15884,6 +15959,7 @@ static void vrUpdateHotbarPanel(float dt)
 {
     for (int h = 0; h < 2; ++h)
         if (g_xrControllerHands[h].trigger < 0.65f) g_vrHotbarOwnsTrigger[h] = false;
+    g_vrHotbarHoverHand[0] = g_vrHotbarHoverHand[1] = false;
     VrXrPanel& p = g_vrHotbarPanel;
     p.visible = false;
     static bool bodyValid = false;
@@ -15940,19 +16016,46 @@ static void vrUpdateHotbarPanel(float dt)
         bodyHeight = head.y;
         bodyValid = true;
     }
+    // ZF22: the hotbar is a belt, not a HUD: looking around (or down at it)
+    // must not drag it. It only re-centres after the head has stayed more
+    // than 55 degrees away for 1 s (the body turned), never while it is in
+    // view, and its position follows the head only slowly (leaning to look
+    // at it does not push it away).
+    static XrVector3f bodyPos{};
+    static Uint32 awaySince = 0;
+    const Uint32 followNow = SDL_GetTicks();
+    if (!bodyValid) bodyPos = head;
+    const XrVector3f viewFwd = vrQuatRotate(g_xrViews[0].pose.orientation, { 0.f, 0.f, -1.f });
+    bool inView = false;
+    if (bodyValid)
+    {
+        const XrVector3f to{ p.layer.pose.position.x - head.x, p.layer.pose.position.y - head.y,
+            p.layer.pose.position.z - head.z };
+        const float tl = std::max(0.001f, sqrtf(to.x * to.x + to.y * to.y + to.z * to.z));
+        inView = (to.x * viewFwd.x + to.y * viewFwd.y + to.z * viewFwd.z) / tl > 0.766f; // 40 degrees
+    }
     float delta = headYaw - bodyYaw;
     while (delta > 3.14159265f) delta -= 6.2831853f;
     while (delta < -3.14159265f) delta += 6.2831853f;
-    if (std::fabs(delta) > 0.61f) following = true; // 35 degrees
+    if (std::fabs(delta) > 0.96f && !inView) // 55 degrees
+    {
+        if (!awaySince) awaySince = followNow;
+        if (followNow - awaySince > 1000) following = true;
+    }
+    else
+        awaySince = 0;
     if (following)
     {
         bodyYaw += delta * std::min(1.f, dt * 5.f);
-        if (std::fabs(delta) < 0.05f) following = false;
+        if (std::fabs(delta) < 0.05f) { following = false; awaySince = 0; }
     }
     bodyHeight += (head.y - bodyHeight) * std::min(1.f, dt * 0.7f);
+    const float posK = std::min(1.f, dt * 1.5f);
+    bodyPos.x += (head.x - bodyPos.x) * posK;
+    bodyPos.z += (head.z - bodyPos.z) * posK;
     constexpr float forward = 0.46f, drop = 0.42f, width = 0.62f;
-    const XrVector3f centre{ head.x - sinf(bodyYaw) * forward, bodyHeight - drop,
-        head.z - cosf(bodyYaw) * forward };
+    const XrVector3f centre{ bodyPos.x - sinf(bodyYaw) * forward, bodyHeight - drop,
+        bodyPos.z - cosf(bodyYaw) * forward };
     p.layer.space = g_xrReferenceSpace;
     p.layer.pose.position = centre;
     p.layer.pose.orientation = vrYawPitchQuat(bodyYaw, -atan2f(drop, forward));
@@ -15972,7 +16075,9 @@ static void vrUpdateHotbarPanel(float dt)
     int hoverSlot = -1, hoverHand = -1;
     g_vrDebugHotbarUV[0] = g_vrDebugHotbarUV[1] = -1.f;
     g_vrHotbarCursorU = g_vrHotbarCursorV = -1.f;
-    for (int hand = 1; hand >= 0 && hoverSlot < 0; --hand)
+    // ZF22: only while the hotbar is in view (an arm hanging down must not
+    // scroll through the slots).
+    for (int hand = 1; hand >= 0 && hoverSlot < 0 && inView; --hand)
     {
         const VrControllerHandState& c = g_xrControllerHands[hand];
         float u = 0.f, v = 0.f;
@@ -16027,6 +16132,7 @@ static void vrUpdateHotbarPanel(float dt)
         }
         triggerWasDown[hand] = down;
     }
+    for (int h = 0; h < 2; ++h) g_vrHotbarHoverHand[h] = hoverSlot >= 0 && hoverHand == h;
     if (hoverSlot >= 0 && hoverSlot != lastHover)
     {
         players[clientnum]->hotbar.selectHotbarSlot(hoverSlot);
@@ -16286,7 +16392,7 @@ static void vrUpdateWristPanel()
         !g_xrControllerHands[panelHand].gripPoseValid || !vrHeadPose(head, headYaw))
         return;
     auto& hud = players[clientnum]->hud;
-    if (!hud.hpFrame || !hud.mpFrame) return;
+    // ZF22: the wrist panel no longer needs Barony's HP/MP frames.
     constexpr int W = 512, H = 320, N = VR_WRIST_COUNT, ButtonsTop = 166, MapX = 308;
     if (!vrPanelEnsure(p, W, H, "wrist")) return;
     const Uint32 now = SDL_GetTicks();
@@ -16308,10 +16414,13 @@ static void vrUpdateWristPanel()
     g_vrHandMenuOwnsLeft = owns && pointerHand == 0;
     if (g_vrHandMenuHover != previousHover && g_vrHandMenuHover >= 0) vrHaptic(pointerHand, 0.25f);
 
-    const SDL_Rect hp = hud.hpFrame->getAbsoluteSize(), mp = hud.mpFrame->getAbsoluteSize();
-    const SDL_Rect bars{ std::min(hp.x, mp.x), std::min(hp.y, mp.y),
-        std::max(hp.x + hp.w, mp.x + mp.w) - std::min(hp.x, mp.x),
-        std::max(hp.y + hp.h, mp.y + mp.h) - std::min(hp.y, mp.y) };
+    // ZF22: health and mana are drawn by the mod from the player's stats. The
+    // copies of Barony's HUD bars depended on that HUD being drawn in the
+    // same frame, and sometimes came out empty (only the buttons showed).
+    const int hpNow = stats[clientnum] ? std::max(0, stats[clientnum]->HP) : 0;
+    const int hpMax = stats[clientnum] ? std::max(1, stats[clientnum]->MAXHP) : 1;
+    const int mpNow = stats[clientnum] ? std::max(0, stats[clientnum]->MP) : 0;
+    const int mpMax = stats[clientnum] ? std::max(1, stats[clientnum]->MAXMP) : 1;
     SDL_Rect effects{};
     const bool hasEffects = vrGetStatusEffectCaptureArea(effects) && effects.w > 0 && effects.h > 0;
     Frame* minimap = hud.minimapFrame;
@@ -16323,11 +16432,6 @@ static void vrUpdateWristPanel()
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        if (bars.w > 0 && bars.h > 0)
-        {
-            const float s = std::min((MapX - 12.f) / bars.w, 110.f / bars.h);
-            vrPanelBlitGui(fbo, H, bars, SDL_Rect{ 6, 46, static_cast<int>(bars.w * s), static_cast<int>(bars.h * s) });
-        }
         if (hasEffects)
         {
             const float s = std::min((MapX - 12.f) / effects.w, 38.f / effects.h);
@@ -16340,33 +16444,42 @@ static void vrUpdateWristPanel()
             const int mw = static_cast<int>(src.w * s), mh = static_cast<int>(src.h * s);
             vrPanelBlitGui(fbo, H, src, SDL_Rect{ MapX + (W - MapX - mw) / 2, 2, mw, mh });
         }
+        glEnable(GL_BLEND);
+        auto label = [&](const std::string& s, int x, int y, int h, bool centre, int cw) {
+            Text* t = Text::get(s.c_str(), "fonts/pixel_maz_multiline.ttf#16#2",
+                makeColor(255, 255, 255, 255), makeColor(0, 0, 0, 255));
+            if (!t) return;
+            const int tw = static_cast<int>(t->getWidth()), th = static_cast<int>(t->getHeight());
+            const float ts = std::min(static_cast<float>(h) / std::max(1, th), (cw - 8.f) / std::max(1, tw));
+            const int dw = static_cast<int>(tw * ts), dh = static_cast<int>(th * ts);
+            t->draw(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ centre ? x + (cw - dw) / 2 : x, y + (h - dh) / 2, dw, dh },
+                viewport);
+        };
+        if (Image* white = Image::get("images/system/white.png"))
+        {
+            auto bar = [&](int y, int now, int max, Uint32 fill, const char* name) {
+                const SDL_Rect back{ 6, y, MapX - 14, 44 };
+                white->drawColor(nullptr, back, viewport, makeColor(20, 14, 10, 230));
+                const int fw = (back.w - 6) * std::min(now, max) / max;
+                if (fw > 0) white->drawColor(nullptr, SDL_Rect{ back.x + 3, y + 3, fw, back.h - 6 }, viewport, fill);
+                label(std::string(name) + " " + std::to_string(now) + "/" + std::to_string(max),
+                    back.x + 8, y + 6, back.h - 12, false, back.w - 16);
+            };
+            bar(48, hpNow, hpMax, makeColor(190, 35, 35, 255), "HP");
+            bar(100, mpNow, mpMax, makeColor(35, 120, 200, 255), "MP");
+        }
         Image* base = Image::get("*images/ui/CharSheet/HUD_CharSheet_Button_00.png");
         Image* high = Image::get("*images/ui/CharSheet/HUD_CharSheet_ButtonHigh_00.png");
-        Image* menu = Image::get("*images/ui/Glyphs/Button_Xbox_Menu_00.png");
         const int labels[VR_WRIST_COUNT] = { 0, 343, 322, 5966 };
         for (int i = 0; i < N; ++i)
         {
             const SDL_Rect cell{ i * (W / N) + 3, ButtonsTop, W / N - 6, H - ButtonsTop - 4 };
             Image* back = (i == hover && high) ? high : base;
             if (back) back->draw(nullptr, cell, viewport);
-            if (i == VR_WRIST_MENU)
-            {
-                if (menu)
-                {
-                    const int size = std::min(cell.w, cell.h) - 40;
-                    menu->draw(nullptr, SDL_Rect{ cell.x + (cell.w - size) / 2, cell.y + (cell.h - size) / 2,
-                        size, size }, viewport);
-                }
-                continue;
-            }
-            Text* text = Text::get(Language::get(labels[i]), "fonts/pixel_maz_multiline.ttf#16#2",
-                makeColor(255, 255, 255, 255), makeColor(0, 0, 0, 255));
-            if (!text) continue;
-            const int tw = static_cast<int>(text->getWidth()), th = static_cast<int>(text->getHeight());
-            const float ts = std::min(1.5f, (cell.w - 8.f) / std::max(1, tw));
-            text->draw(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ cell.x + static_cast<int>((cell.w - tw * ts) / 2),
-                cell.y + static_cast<int>((cell.h - th * ts) / 2), static_cast<int>(tw * ts),
-                static_cast<int>(th * ts) }, viewport);
+            // ZF22: a text label like the others (the round gamepad glyph
+            // looked cut off and taller than its neighbours).
+            label(i == VR_WRIST_MENU ? std::string("MENU") : std::string(Language::get(labels[i])),
+                cell.x, cell.y + cell.h / 2 - 18, 36, true, cell.w);
         }
         // Pointer feedback: Barony's own hand cursor where the ray lands.
         if (rayOnPanel)
@@ -16488,6 +16601,14 @@ static void vrTestWritePose()
             tip ? 1 : 0, tip ? tip->x / 16.0 : 0.0, tip ? tip->y / 16.0 : 0.0,
             parent ? parent->sprite : -1, tip ? p.worldUI.interactText.c_str() : "-");
         std::fprintf(file, "Z tip=%.2f cam=%.2f player=%.2f\n", tip ? tip->z : 0.0, cam.z, p.entity->z);
+        std::fprintf(file, "A attack=%d defend=%d use=%d charge=%d weapon=%d shield=%d defending=%d hasController=%d\n",
+            Input::inputs[vrActionInputPlayer()].binary("Attack") ? 1 : 0,
+            Input::inputs[vrActionInputPlayer()].binary("Defend") ? 1 : 0,
+            Input::inputs[vrActionInputPlayer()].binary("Use") ? 1 : 0,
+            p.hud.weapon ? static_cast<int>(p.hud.weapon->skill[3]) : -1,
+            stats[clientnum] && stats[clientnum]->weapon ? static_cast<int>(stats[clientnum]->weapon->type) : -1,
+            stats[clientnum] && stats[clientnum]->shield ? static_cast<int>(stats[clientnum]->shield->type) : -1,
+            stats[clientnum] && stats[clientnum]->defending ? 1 : 0, inputs.hasController(clientnum) ? 1 : 0);
         // Nearby mechanisms: S=lever/switch, G=gate, D=door (tile coords).
         if (map.entities)
         {
