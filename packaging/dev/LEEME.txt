@@ -37,7 +37,8 @@ CON VENTANAS ABIERTAS (inventario, hechizos, cofre, tienda, altar, mapa, pausa..
 MENUS DE INICIO Y LOBBY
   Gatillo derecho o A .. Pulsar botones, unirse a la partida.
   En tu tarjeta del lobby (personaje, clase, "Todo a punto"): Barony la maneja
-  como un mando, sin puntero. Stick izquierdo = moverte entre opciones,
+  como un mando: apunta con el rayo a una opcion para seleccionarla (o usa el
+  stick izquierdo),
   gatillo derecho o A = aceptar, B o Y = atras / quitar "Todo a punto".
 
 MUNECA (estilo Demeo)
@@ -47,12 +48,14 @@ MUNECA (estilo Demeo)
   mano sobre el panel) y pulsa su gatillo o A/X. Con los brazos extendidos no sale.
 
 INTERFAZ
-  - Hotbar y mensajes: debajo de la vista, como un cinturon; baja la mirada para
-    verlos. Solo se recoloca si te giras mas de ~55 grados durante 1 s.
+  - Mensajes (lo que dicen los NPC, objetos recogidos...): centrados bajo la
+    vista. El hotbar, algo mas abajo; ambos siguen el giro de la cabeza sin
+    retraso. Solo puedes apuntar al hotbar cuando lo estas mirando.
   - Avisos de interaccion: flotan junto al objeto que vas a usar (elegido por
     donde miras), a la altura de los ojos.
   - Cofres, tiendas y mesas de trabajo abren su ventana hacia el objeto.
 
 Ajustes en vr_settings.cfg (carpeta de Barony):
   hotbar=view | belt      wrist_ui=look | always      xr_runtime=auto | active | steamvr
-  combat=button | gesture
+  combat=button | gesture      wrist_render=world | layer
+  debug_dump=2  (guarda capturas en la carpeta vr_debug cada 2 s; 0 = apagado)
