@@ -12,31 +12,45 @@ Para volver a la version oficial: descarga de nuevo la release 1.0.2 y ejecuta s
 CONTROLES EN PARTIDA (mandos Quest)
   Gatillo derecho ...... Atacar. Si hay un aviso de interaccion (puerta, palanca,
                          objeto, antorcha...) lo usa.
+  Gatillo (apuntando
+   al hotbar) .......... Equipa esa casilla (vale con cualquier mano)
   A .................... Usar / interactuar
   B .................... Lanzar hechizo
-  Grip izq. (toque) .... Casilla anterior del hotbar
-  Grip der. (toque) .... Casilla siguiente del hotbar
-  Stick der. arriba .... Equipar la casilla seleccionada (tambien Y)
-  Stick der. izq/der ... Girar     Stick der. abajo ... Giro rapido 180
+  X .................... Abrir inventario
+  Y .................... Abrir menu de pausa
+  Clic stick izq. ...... Llamar a los aliados
+  Clic stick der. ...... Siguiente interaccion (si hay varias cerca)
   Stick izquierdo ...... Moverse
+  Stick der. izq/der ... Girar     Stick der. abajo ... Giro rapido 180
   Gatillo izquierdo .... Defender / sigilo
-  X .................... Inventario / ficha
-  Mantener los grips sigue sirviendo para agarrar, beber, mochila y arco.
+  Pulsar ambos sticks .. Menu de pausa (mantener 1,5 s: cambiar modo de juego)
+  Los grips siguen sirviendo para agarrar, beber, mochila y arco.
 
-MENU DE MANO (estilo Demeo)
-  Mira tu muneca izquierda girandola hacia ti (como para ver un reloj):
-  aparecen salud, mana y estados en el antebrazo y, encima de la mano, botones
-  Menu (pausa), Inventario, Hechizos, Mapa y Registro. Apunta con el mando
-  derecho y pulsa gatillo o A. En la muneca derecha: el minimapa.
-  Ya no hace falta el boton de menu izquierdo (que en SteamVR abre su panel).
+CON VENTANAS ABIERTAS
+  Inventario ........... X cierra. Y cambia a Hechizos.
+  Hechizos ............. X o Y cierran.
+  Cofre, tienda, mesa,
+   mapa, registro ...... X o Y cierran.
+  Menu de pausa ........ Y vuelve al juego (en submenus: atras).
+  Gatillo derecho o A .. Clic con el puntero.   Stick der. arriba/abajo .. Desplazar.
+  B ya no cierra ventanas en partida (solo es "atras" en los menus de inicio).
+
+MENUS DE INICIO Y LOBBY
+  Gatillo derecho o A .. Pulsar botones, unirse a la partida, "Todo a punto".
+  B .................... Atras.
+
+MUNECA (estilo Demeo)
+  Lleva una muneca cerca de la cara girandola hacia ti (gesto de mirar un reloj).
+  En esa mano aparece un panel con estados, salud, mana, minimapa y 4 botones:
+  Menu, Inventario, Hechizos y Mapa. Apunta con la otra mano (veras el cursor de
+  mano sobre el panel) y pulsa su gatillo o A/X. Con los brazos extendidos no sale.
 
 INTERFAZ
   - Hotbar y mensajes: debajo de la vista, fijos al cuerpo; baja la mirada para
     verlos. Siguen el giro solo cuando te giras mas de ~35 grados.
-  - Avisos de interaccion: junto al objeto que puedes usar.
+  - Avisos de interaccion: flotan junto al objeto que vas a usar (elegido por
+    donde miras), a la altura de los ojos.
   - Cofres, tiendas y mesas de trabajo abren su ventana hacia el objeto.
-  - Menus: puntero centrado en la mano; al apretar el gatillo el cursor se
-    queda quieto para no tocar la casilla vecina.
 
 Ajustes en vr_settings.cfg (carpeta de Barony):
   hotbar=view | belt      wrist_ui=look | always      xr_runtime=auto | active | steamvr

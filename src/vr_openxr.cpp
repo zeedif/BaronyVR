@@ -767,6 +767,14 @@ static bool g_vrPromptPanelActive = false;   // prompt drawn at the object
 static bool g_vrPromptVisible = false;       // an interaction prompt is showing
 static int g_vrHandMenuHover = -1;           // hovered hand-menu button, -1 none
 static bool g_vrHandMenuOwnsRight = false;   // right trigger/A belong to the hand menu
+static bool g_vrHandMenuOwnsLeft = false;    // ZF16: left trigger/X point at the wrist panel
+static bool g_vrHotbarOwnsTrigger[2] = { false, false }; // ZF15: trigger aimed at the hotbar
+static Uint32 g_vrHotbarEquipPulseUntil = 0;  // ZF15: virtual Y pulse = equip slot
+static bool g_vrCallOutPulse = false, g_vrNextInteractPulse = false; // ZF15: L3 / R3 taps
+static float g_vrDebugHotbarUV[3] = { -1.f, -1.f, -1.f }; // u, v, slot (debug)
+struct VrXrPanel;
+static bool vrPanelRayUV(const VrXrPanel& p, const XrPosef& aim, float& u, float& v);
+static void vrHaptic(int hand, float amplitude);
 static void vrUpdateExtraPanels();
 static uint32_t vrAppendExtraLayers(const XrCompositionLayerBaseHeader** layers,
     uint32_t count, uint32_t maxCount);
@@ -1240,7 +1248,10 @@ static void vrUpdateMenuNavigation(bool validInput = true)
         if (!testLobbyAWaitSince) testLobbyAWaitSince = now;
         else if (now - testLobbyAWaitSince > 3000) { testLobbyAFrames = 12; testLobbyAWaitSince = 0; }
     }
-    const bool primaryPressed = right.primaryButton || testLobbyAFrames > 0;
+    // ZF16: on the join card the trigger works like A, as on every other
+    // lobby button (ready, cancel ready...).
+    const bool primaryPressed = right.primaryButton || right.trigger >= 0.65f ||
+        testLobbyAFrames > 0;
     if (testLobbyAFrames > 0) --testLobbyAFrames;
     const bool lobbyLoginDown = menuPresent && primaryPressed &&
         (lobbyLoginWasDown || awaitingLogin);
@@ -1260,12 +1271,15 @@ static void vrUpdateMenuNavigation(bool validInput = true)
         return;
     }
 
-    if (right.secondaryButton != g_xrVrMenuEscapeWasDown)
+    // ZF16: B is "back" only in the title / lobby menus; in game X and Y
+    // close windows and the pause menu (see the X/Y handler).
+    const bool menuBackDown = right.secondaryButton && intro;
+    if (menuBackDown != g_xrVrMenuEscapeWasDown)
     {
-        vrSendMenuKey(SDLK_ESCAPE, right.secondaryButton);
-        g_xrVrMenuEscapeWasDown = right.secondaryButton;
+        vrSendMenuKey(SDLK_ESCAPE, menuBackDown);
+        g_xrVrMenuEscapeWasDown = menuBackDown;
         std::printf("OpenXR VR: STEP620 MENU ESCAPE %s\n",
-            right.secondaryButton ? "DOWN" : "UP");
+            menuBackDown ? "DOWN" : "UP");
     }
 
     // Left grip temporarily turns the right stick into pointer alignment
@@ -3998,7 +4012,7 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     auto applyDpad = [&]() {
         setButton(g_xrVirtualSDLJoystick,SDL_CONTROLLER_BUTTON_DPAD_UP,dpadDirection==1);
         setButton(g_xrVirtualSDLJoystick,SDL_CONTROLLER_BUTTON_DPAD_RIGHT,dpadDirection==2);
-        setButton(g_xrVirtualSDLJoystick,SDL_CONTROLLER_BUTTON_DPAD_DOWN,dpadDirection==3);
+        setButton(g_xrVirtualSDLJoystick,SDL_CONTROLLER_BUTTON_DPAD_DOWN,dpadDirection==3 || g_vrNextInteractPulse);
         setButton(g_xrVirtualSDLJoystick,SDL_CONTROLLER_BUTTON_DPAD_LEFT,dpadDirection==4);
         if(dpadMode && vrMenuPointerMode()) {
             // While touch explicitly selects native UI navigation, expose
@@ -4120,7 +4134,7 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         1.0f : (bowHotbarSelection ? left.trigger :
         (bowControls ? (bowInputArmed ? bowHoldControl.trigger : 0.f) : left.trigger));
     setAxis(g_xrVirtualSDLJoystick, SDL_CONTROLLER_AXIS_TRIGGERLEFT,
-        triggerAxis(leftSneakTrigger));
+        triggerAxis((g_vrHotbarOwnsTrigger[0] || g_vrHandMenuOwnsLeft) ? 0.f : leftSneakTrigger));
     // STEP 638DG: Empty-hand punches use the same physical-swing path as
     // melee weapons. Suppress the virtual trigger for BOTH cases so simply
     // holding trigger to charge cannot also create unintended vanilla punches.
@@ -4143,12 +4157,13 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     const bool triggerDownNow = useInput && right.trigger >= 0.65f;
     if (triggerDownNow && !triggerWasDown)
         triggerUseLatched = g_vrPromptVisible && !vrMenuPointerMode() &&
-            !g_vrHandMenuOwnsRight && !bowControls;
+            !g_vrHandMenuOwnsRight && !g_vrHotbarOwnsTrigger[1] && !bowControls;
     if (right.trigger < 0.3f) triggerUseLatched = false;
     triggerWasDown = triggerDownNow;
     setAxis(g_xrVirtualSDLJoystick, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,
         (vrMenuPointerMode() || g_xrVrPointerActive ||
          g_xrVrPointerTriggerConsumed || triggerUseLatched || g_vrHandMenuOwnsRight ||
+         g_vrHotbarOwnsTrigger[1] ||
          physicalMeleeOwnsAttack || physicalBowControls) ?
         triggerAxis(0.f) : triggerAxis(bowHotbarSelection ? right.trigger :
             (bowControls ? (bowInputArmed ? bowDrawControl.trigger : 0.f) : right.trigger)));
@@ -4163,57 +4178,53 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         players[clientnum]->gui_mode == GUI_MODE_INVENTORY;
     // X/Y have explicit Character/Spells tab actions in the VR inventory.
     // Don't forward a second native X/Y event into the same menu.
-    // ZF13 VR layout (Barony Xbox actions, Vivecraft / Team Beef placement):
-    //   right trigger  Attack (Use while a prompt shows)   Xbox RT / A
+    // ZF15 VR layout (Barony Xbox actions, Vivecraft / Team Beef placement):
+    //   right trigger  Attack; Use while a prompt shows;    Xbox RT / A
+    //                  aimed at a hotbar slot: equip it     Xbox Y
+    //   left trigger   Defend / sneak; aimed at hotbar: equip  Xbox LT / Y
     //   A              Use / interact                       Xbox A
     //   B              Cast spell                           Xbox LB
-    //   grip tap L / R Hotbar previous / next               Xbox X / B
-    //   right stick up Equip selected hotbar slot           Xbox Y
-    //   Y              Equip selected hotbar slot           Xbox Y
     //   X              Character / inventory                Xbox Back
-    //   left trigger   Defend / sneak                       Xbox LT
-    // Holding a grip keeps its physical role (grab, drink, backpack, bow).
+    //   Y              Pause menu                           Xbox Start
+    //   L3 click       Call out to allies                   Xbox LS
+    //   R3 click       Next interaction (several in range)  Xbox D-pad down
+    // Grips keep their physical roles (grab, drink, backpack, bow). Pressing
+    // both sticks still opens the menu; holding both 1.5 s switches modes.
     const bool bowOwnsRightGrip=vrPhysicalBowOwnsAttack(clientnum) &&
         g_vrBowDrawHand==1 && (g_vrBowPreview.drawing || g_vrBowRelease.pending);
-    struct GripTap { bool down = false, spoiled = false; Uint32 since = 0, pulseUntil = 0; };
-    static GripTap gripTaps[2];
     const Uint32 tapNow = SDL_GetTicks();
-    auto gripTap = [&](int hand, float squeeze, bool owned) {
-        GripTap& t = gripTaps[hand];
-        if (!useInput) { t = GripTap{}; return false; }
-        if (!t.down && squeeze >= 0.6f) { t.down = true; t.since = tapNow; t.spoiled = owned; }
+    // Single stick-click taps (never while the other stick is clicked, so
+    // the two-stick chord keeps working).
+    struct StickTap { bool down = false, spoiled = false; Uint32 since = 0, pulseUntil = 0; };
+    static StickTap stickTaps[2];
+    auto stickTap = [&](int hand, bool down, bool otherDown) {
+        StickTap& t = stickTaps[hand];
+        if (!useInput) { t = StickTap{}; return false; }
+        if (!t.down && down) { t.down = true; t.since = tapNow; t.spoiled = otherDown; }
         else if (t.down)
         {
-            if (owned) t.spoiled = true;
-            if (squeeze < 0.35f)
+            if (otherDown) t.spoiled = true;
+            if (!down)
             {
                 t.down = false;
-                if (!t.spoiled && tapNow - t.since <= 350) t.pulseUntil = tapNow + 90;
+                if (!t.spoiled && tapNow - t.since <= 400) t.pulseUntil = tapNow + 100;
             }
         }
         return static_cast<Sint32>(t.pulseUntil - tapNow) > 0;
     };
-    const bool hotbarPrev = gripTap(0, left.squeeze, bowControls ||
-        g_vrMeleeExitGripsSuppressed || vrWorldGrabOwnsGrip(0));
-    const bool hotbarNext = gripTap(1, right.squeeze, bowControls || bowOwnsRightGrip ||
-        g_vrMeleeExitGripsSuppressed || vrWorldGrabOwnsGrip(1) || g_vrDrinkOwnsRightGrip ||
-        g_xrVrBackpackInZone || g_xrVrBackpackGripConsumed);
-    static bool equipStickHeld = false;
-    static Uint32 equipPulseUntil = 0;
-    const bool equipStickAllowed = useInput && !vrMenuPointerMode() && !g_vrArmCalibrationActive;
-    if (!equipStickAllowed || right.thumbstick.y <= 0.42f) equipStickHeld = false;
-    else if (right.thumbstick.y >= 0.78f && !equipStickHeld)
-    {
-        equipStickHeld = true;
-        equipPulseUntil = tapNow + 90;
-    }
-    const bool equipPulse = static_cast<Sint32>(equipPulseUntil - tapNow) > 0;
-    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_X, hotbarPrev);
+    g_vrCallOutPulse = stickTap(0, left.thumbstickClick, right.thumbstickClick);
+    g_vrNextInteractPulse = stickTap(1, right.thumbstickClick, left.thumbstickClick);
+    static bool pauseWasDown = false;
+    const bool pauseDown = useInput && left.secondaryButton && !armCalChord;
+    if (pauseDown && !pauseWasDown) g_xrVrMenuPulseUntilMs = tapNow + 125;
+    pauseWasDown = pauseDown;
+    (void)bowOwnsRightGrip;
+    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_X, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_Y,
-        (left.secondaryButton && !armCalChord && !inGameInventory) || equipPulse);
+        static_cast<Sint32>(g_vrHotbarEquipPulseUntil - tapNow) > 0);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_A,
         (right.primaryButton || triggerUseLatched) && !g_vrHandMenuOwnsRight);
-    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_B, hotbarNext);
+    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_B, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
         (bowHotbarSelection ? left.squeeze >= .5f :
             (physicalBowControls ? bowSpellPressed :
@@ -4224,7 +4235,8 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
           (g_xrVrBackpackInZone || g_xrVrBackpackGripConsumed)));
     // RB is Barony's Quick Turn: that lives on right-stick down (below).
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, false);
-    const bool characterButton = left.primaryButton && !armCalChord && !inGameInventory;
+    const bool characterButton = left.primaryButton && !armCalChord && !inGameInventory &&
+        !g_vrHandMenuOwnsLeft;
     // STEP638GA3: Push the RIGHT analog stick DOWN for vanilla Quick Turn.
     // OpenXR thumbstick Y is negative when down. The right stick's normal
     // Y/look axis stays zero (headset owns pitch), and right-stick CLICK is
@@ -4255,7 +4267,7 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         std::printf("OpenXR VR GA5: right-stick-down direct Quick Turn fired\n");
     }
 
-    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_LEFTSTICK, false);
+    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_LEFTSTICK, g_vrCallOutPulse); // ZF15: L3 = Call Out
     // Keep physical stick-click reserved for menu chords/calibration.
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_RIGHTSTICK, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_START,
@@ -6162,36 +6174,45 @@ static void vrUpdateControllerInputs(XrTime predictedDisplayTime)
         !g_xrControllerHands[0].secondaryButton;
     const bool uiYDown = g_xrControllerHands[0].secondaryButton &&
         !g_xrControllerHands[0].primaryButton;
-    const bool canSwitchTabs = !g_vrArmCalibrationActive &&
-        g_xrSessionState == XR_SESSION_STATE_FOCUSED &&
-        !intro && !gamePaused &&
-        clientnum >= 0 && clientnum < MAXPLAYERS &&
-        players[clientnum] && !players[clientnum]->shootmode &&
-        players[clientnum]->gui_mode == GUI_MODE_INVENTORY &&
+    // ZF16: X / Y own the in-game windows (B is no longer "close"):
+    //   gameplay        X opens inventory, Y opens the pause menu (gamepad map)
+    //   inventory       X closes, Y opens spells; in spells X or Y closes
+    //   other windows   (chest, shop, workstation, map, log...) X or Y closes
+    //   pause menu      Y returns to the game (Escape: also "back" in submenus)
+    const bool inGameSession = !g_vrArmCalibrationActive &&
+        g_xrSessionState == XR_SESSION_STATE_FOCUSED && !intro &&
+        clientnum >= 0 && clientnum < MAXPLAYERS && players[clientnum] &&
         !players[clientnum]->usingCommand();
-    if (canSwitchTabs && uiXDown && !g_xrVrUiXWasDown)
+    const bool xPressed = uiXDown && !g_xrVrUiXWasDown;
+    const bool yPressed = uiYDown && !g_xrVrUiYWasDown;
+    if (inGameSession && gamePaused)
     {
-        Player* p = players[clientnum];
-        Player::GUI_t::GUIModules next = Player::GUI_t::MODULE_CHARACTERSHEET;
-        if (p->GUI.activeModule == Player::GUI_t::MODULE_CHARACTERSHEET)
-            next = Player::GUI_t::MODULE_SKILLS_LIST;
-        else if (p->GUI.activeModule == Player::GUI_t::MODULE_SKILLS_LIST)
-            next = Player::GUI_t::MODULE_INVENTORY;
-        p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_ITEM, next);
-        std::printf("OpenXR VR: STEP614 X -> UI module %d\n",
-            static_cast<int>(next));
+        if (yPressed)
+        {
+            vrSendMenuKey(SDLK_ESCAPE, true);
+            vrSendMenuKey(SDLK_ESCAPE, false);
+            printlog("[VR ZF16] Y -> back / resume");
+        }
     }
-    if (canSwitchTabs && uiYDown && !g_xrVrUiYWasDown)
+    else if (inGameSession && !players[clientnum]->shootmode && (xPressed || yPressed))
     {
         Player* p = players[clientnum];
-        const bool alreadySpells =
-            p->GUI.activeModule == Player::GUI_t::MODULE_SPELLS;
-        p->openStatusScreen(GUI_MODE_INVENTORY,
-            alreadySpells ? INVENTORY_MODE_ITEM : INVENTORY_MODE_SPELL,
-            alreadySpells ? Player::GUI_t::MODULE_INVENTORY :
+        const bool inventory = p->gui_mode == GUI_MODE_INVENTORY &&
+            !p->inventoryUI.chestGUI.bOpen && !p->shopGUI.bOpen &&
+            !GenericGUI[clientnum].isGUIOpen() && !p->minimap.mapWindow &&
+            !p->messageZone.logWindow;
+        const bool spells = p->GUI.activeModule == Player::GUI_t::MODULE_SPELLS;
+        if (yPressed && inventory && !spells)
+        {
+            p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_SPELL,
                 Player::GUI_t::MODULE_SPELLS);
-        std::printf("OpenXR VR: STEP614 Y -> %s tab\n",
-            alreadySpells ? "INVENTORY" : "SPELLS");
+            printlog("[VR ZF16] Y -> spells");
+        }
+        else
+        {
+            p->closeAllGUIs(CLOSEGUI_ENABLE_SHOOTMODE, CLOSEGUI_CLOSE_ALL);
+            printlog("[VR ZF16] %c -> close windows", xPressed ? 'X' : 'Y');
+        }
     }
     g_xrVrUiXWasDown = uiXDown;
     g_xrVrUiYWasDown = uiYDown;
@@ -6533,13 +6554,14 @@ static bool g_xrPendingShouldRender = false;
 // ZF10 (Demeo / Vivecraft wrist HUD): wrist panels appear while the player
 // looks at that wrist - head forward within ~28 deg of the controller, hidden
 // again beyond ~38 deg (hysteresis avoids flicker). OpenXR metres throughout.
+static bool s_wristRaw[2] = { false, false };
 static void vrUpdateWristLook()
 {
     for (int hand = 0; hand < 2; ++hand)
     {
         const VrControllerHandState& state = g_xrControllerHands[hand];
-        if (!g_vrWristUiOnLook) { g_vrWristLook[hand] = true; continue; }
-        if (!g_xrEyeViewsValid || !state.gripPoseValid) { g_vrWristLook[hand] = false; continue; }
+        if (!g_vrWristUiOnLook) { s_wristRaw[hand] = true; continue; }
+        if (!g_xrEyeViewsValid || !state.gripPoseValid) { s_wristRaw[hand] = false; continue; }
         const XrQuaternionf& q = g_xrViews[0].pose.orientation;
         const float fx = -2.f * (q.x * q.z + q.w * q.y);
         const float fy = -2.f * (q.y * q.z - q.w * q.x);
@@ -6551,8 +6573,7 @@ static void vrUpdateWristLook()
         const float dy = state.gripPose.position.y - hy;
         const float dz = state.gripPose.position.z - hz;
         const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-        if (distance < 0.05f || distance > 0.75f) { g_vrWristLook[hand] = false; continue; }
-        const float cosine = (fx * dx + fy * dy + fz * dz) / distance;
+        const float cosine = distance > 0.01f ? (fx * dx + fy * dy + fz * dz) / distance : 0.f;
         // ZF11: a real "look at the watch" gesture, not just a visible hand.
         // Arms stretched forward point the forearm (grip -Z) along the line
         // of sight; the gesture holds it across the view with the controller
@@ -6564,16 +6585,40 @@ static void vrUpdateWristLook()
         const float ux = 2.f * (g.x * g.y - g.w * g.z);
         const float uy = 1.f - 2.f * (g.x * g.x + g.z * g.z);
         const float uz = 2.f * (g.y * g.z + g.w * g.x);
-        const float along = std::fabs(ax * dx + ay * dy + az * dz) / distance;
-        const float facing = std::fabs(ux * dx + uy * dy + uz * dz) / distance;
-        const bool was = g_vrWristLook[hand];
-        g_vrWristLook[hand] = was ?
-            (cosine > 0.707f /* 45 deg */ && along < 0.75f && facing > 0.30f) :
-            (cosine > 0.819f /* 35 deg */ && along < 0.55f && facing > 0.45f);
-        if (was != g_vrWristLook[hand])
+        const float d = std::max(0.01f, distance);
+        const float along = std::fabs(ax * dx + ay * dy + az * dz) / d;
+        const float facing = std::fabs(ux * dx + uy * dy + uz * dz) / d;
+        // ZF15: the watch gesture brings the wrist CLOSE to the face (arms
+        // stretched forward used to qualify), between chest and eye height,
+        // in the centre of the view. Must hold ~150 ms to show, and must be
+        // broken for ~250 ms to hide, so it neither flickers nor pops up
+        // while fighting.
+        const bool nearFace = distance > 0.12f && distance < 0.52f && dy < 0.08f && dy > -0.60f;
+        const bool strict = nearFace && cosine > 0.866f /* 30 deg */ && along < 0.55f && facing > 0.35f;
+        const bool loose = distance < 0.62f && dy < 0.15f && dy > -0.70f &&
+            cosine > 0.766f /* 40 deg */ && along < 0.70f && facing > 0.22f;
+        static Uint32 since[2] = { 0, 0 };
+        const Uint32 now = SDL_GetTicks();
+        const bool was = s_wristRaw[hand];
+        const bool wantChange = was ? !loose : strict;
+        if (!wantChange) since[hand] = 0;
+        else if (!since[hand]) since[hand] = now ? now : 1;
+        else if (now - since[hand] >= (was ? 250u : 150u))
+        {
+            s_wristRaw[hand] = !was;
+            since[hand] = 0;
+        }
+        if (was != s_wristRaw[hand])
             printlog("[VR ZF10] %s wrist panel %s", hand ? "right" : "left",
-                g_vrWristLook[hand] ? "shown" : "hidden");
+                s_wristRaw[hand] ? "shown" : "hidden");
     }
+    // ZF16: one wrist panel, on the hand that made the gesture first; the
+    // other hand points at it.
+    static int active = -1;
+    if (active >= 0 && !s_wristRaw[active]) active = -1;
+    if (active < 0) active = s_wristRaw[0] ? 0 : (s_wristRaw[1] ? 1 : -1);
+    g_vrWristLook[0] = active == 0;
+    g_vrWristLook[1] = active == 1;
 }
 
 void vrProcessOpenXRFrame(view_t* camera)
@@ -10231,6 +10276,11 @@ static void vrDrawWearableHudFoundation(view_t* eyeCamera, int handIndex,
         clientnum < 0 || clientnum >= MAXPLAYERS ||
         !players[clientnum] || !players[clientnum]->shootmode)
         return;
+    // ZF15: wrist HUD now lives on OpenXR panels beside the wrist
+    // (vrUpdateLeftWristPanel / vrUpdateRightWristPanel); keep this
+    // world-space forearm copy off so it is not drawn twice.
+    (void)handIndex;
+    return;
     // ZF10: only while the player looks at this wrist (wrist_ui=look).
     if (handIndex >= 0 && handIndex < 2 && !g_vrWristLook[handIndex])
         return;
@@ -15688,6 +15738,8 @@ static bool vrGameplayHudAllowed()
 // ---- Hotbar (body-locked) --------------------------------------------------
 static void vrUpdateHotbarPanel(float dt)
 {
+    for (int h = 0; h < 2; ++h)
+        if (g_xrControllerHands[h].trigger < 0.65f) g_vrHotbarOwnsTrigger[h] = false;
     VrXrPanel& p = g_vrHotbarPanel;
     p.visible = false;
     static bool bodyValid = false;
@@ -15708,7 +15760,8 @@ static void vrUpdateHotbarPanel(float dt)
 
     // Hotbar centred at the bottom (1:1 virtual pixels when it fits), the
     // dungeon messages left-aligned above it.
-    const float hs = std::min(1.f, std::min((W - 8.f) / hotbar.w, 150.f / hotbar.h));
+    // ZF15: fill the width so each slot is a comfortable pointing target.
+    const float hs = std::min((W - 16.f) / hotbar.w, 170.f / hotbar.h);
     const SDL_Rect hotbarDst{ static_cast<int>(W / 2 - hotbar.w * hs / 2),
         static_cast<int>(H - 4 - hotbar.h * hs), static_cast<int>(hotbar.w * hs),
         static_cast<int>(hotbar.h * hs) };
@@ -15752,6 +15805,59 @@ static void vrUpdateHotbarPanel(float dt)
     p.layer.size.width = width;
     p.layer.size.height = width * H / W;
     p.visible = true;
+
+    // ZF15: point at a slot with either controller; its trigger equips it
+    // (Barony "Hotbar Up / Select"). Hovering selects the slot so Barony's
+    // own highlight and tooltip show which item will be equipped.
+    static bool triggerWasDown[2] = { false, false };
+    static int lastHover = -1;
+    int hoverSlot = -1, hoverHand = -1;
+    g_vrDebugHotbarUV[0] = g_vrDebugHotbarUV[1] = -1.f;
+    for (int hand = 1; hand >= 0 && hoverSlot < 0; --hand)
+    {
+        const VrControllerHandState& c = g_xrControllerHands[hand];
+        float u = 0.f, v = 0.f;
+        if (!c.aimPoseValid || !vrPanelRayUV(p, c.aimPose, u, v)) continue;
+        if (hand == 1) { g_vrDebugHotbarUV[0] = u; g_vrDebugHotbarUV[1] = v; }
+        const float vx = hotbar.x + (u * W - hotbarDst.x) / hs;
+        const float vy = hotbar.y + (v * H - hotbarDst.y) / hs;
+        for (int slot = 0; slot < static_cast<int>(NUM_HOTBAR_SLOTS); ++slot)
+        {
+            Frame* frame = players[clientnum]->hotbar.getHotbarSlotFrame(slot);
+            if (!frame || frame->isDisabled()) continue;
+            const SDL_Rect r = frame->getAbsoluteSize();
+            if (vx >= r.x - 2 && vx < r.x + r.w + 2 && vy >= r.y - 6 && vy < r.y + r.h + 6)
+            {
+                hoverSlot = slot;
+                hoverHand = hand;
+                break;
+            }
+        }
+    }
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        const bool down = g_xrControllerHands[hand].trigger >= 0.65f;
+        if (!down) g_vrHotbarOwnsTrigger[hand] = false;
+        if (hand == hoverHand)
+        {
+            g_vrHotbarOwnsTrigger[hand] = g_vrHotbarOwnsTrigger[hand] || true;
+            if (down && !triggerWasDown[hand])
+            {
+                players[clientnum]->hotbar.selectHotbarSlot(hoverSlot);
+                g_vrHotbarEquipPulseUntil = SDL_GetTicks() + 90;
+                vrHaptic(hand, 0.4f);
+                printlog("[VR ZF15] hotbar slot %d equipped with the %s trigger", hoverSlot + 1, hand ? "right" : "left");
+            }
+        }
+        triggerWasDown[hand] = down;
+    }
+    if (hoverSlot >= 0 && hoverSlot != lastHover)
+    {
+        players[clientnum]->hotbar.selectHotbarSlot(hoverSlot);
+        vrHaptic(hoverHand, 0.2f);
+    }
+    lastHover = hoverSlot;
+    g_vrDebugHotbarUV[2] = static_cast<float>(hoverSlot);
 }
 
 // ---- Interaction prompt at the object -------------------------------------
@@ -15772,209 +15878,294 @@ static bool vrBaronyToLocal(const Entity& e, const XrVector3f& head, XrVector3f&
     return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
 }
 
+// ---- ZF15: head-gaze interaction selection ---------------------------------
+// Barony picks the usable object inside a +-22.5 degree cone around the BODY
+// yaw, which in VR only turns with the stick: prompts blinked as the head
+// moved. In VR the cone follows the head (camera heading minus head yaw, the
+// same heading the stereo renderer uses) and is a little wider. Barony's
+// own Use action targets this selection, so A / trigger act on what you see.
+real_t vrInteractYaw(int player, real_t bodyYaw)
+{
+    if (player != clientnum || intro || !vrCustomCrosshairModeActive()) return bodyYaw;
+    real_t yaw = cameras[player].ang - vrHeadYaw;
+    while (yaw < 0) yaw += 2 * PI;
+    while (yaw >= 2 * PI) yaw -= 2 * PI;
+    return yaw;
+}
+real_t vrInteractAngle(int player, real_t angle)
+{
+    if (player != clientnum || intro || !vrCustomCrosshairModeActive()) return angle;
+    return std::min<real_t>(PI / 4.5, angle * 1.6);
+}
+
+static void vrPanelFillRect(const SDL_Rect& rect, const SDL_Rect& viewport, Uint32 color)
+{
+    if (Image* white = Image::get("images/system/white.png"))
+        white->drawColor(nullptr, rect, viewport, color);
+}
+
+static void vrPanelSetFacing(VrXrPanel& p, const XrVector3f& centre, const XrVector3f& head,
+    float widthM)
+{
+    p.layer.space = g_xrReferenceSpace;
+    p.layer.pose.position = centre;
+    p.layer.pose.orientation = vrFacingQuat(centre, head);
+    p.layer.size.width = widthM;
+    p.layer.size.height = widthM * p.height / p.width;
+}
+
+// Ray (aim pose) against a panel; returns panel UV (0..1, top-left origin).
+static bool vrPanelRayUV(const VrXrPanel& p, const XrPosef& aim, float& u, float& v)
+{
+    const XrQuaternionf& q = p.layer.pose.orientation;
+    const XrVector3f c = p.layer.pose.position;
+    const XrVector3f n = vrQuatRotate(q, { 0.f, 0.f, 1.f });
+    const XrVector3f ax = vrQuatRotate(q, { 1.f, 0.f, 0.f });
+    const XrVector3f ay = vrQuatRotate(q, { 0.f, 1.f, 0.f });
+    const XrVector3f d = vrQuatRotate(aim.orientation, { 0.f, 0.f, -1.f });
+    const float denom = d.x * n.x + d.y * n.y + d.z * n.z;
+    if (std::fabs(denom) < 1e-4f) return false;
+    const XrVector3f o = aim.position;
+    const float t = ((c.x - o.x) * n.x + (c.y - o.y) * n.y + (c.z - o.z) * n.z) / denom;
+    if (t <= 0.f || t > 3.f) return false;
+    const XrVector3f h{ o.x + t * d.x - c.x, o.y + t * d.y - c.y, o.z + t * d.z - c.z };
+    u = (h.x * ax.x + h.y * ax.y + h.z * ax.z) / p.layer.size.width + 0.5f;
+    v = 0.5f - (h.x * ay.x + h.y * ay.y + h.z * ay.z) / p.layer.size.height;
+    return u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f;
+}
+
+static void vrHaptic(int hand, float amplitude)
+{
+    if (g_xrHapticAction == XR_NULL_HANDLE || g_xrSession == XR_NULL_HANDLE) return;
+    XrHapticVibration pulse{ XR_TYPE_HAPTIC_VIBRATION };
+    pulse.amplitude = amplitude;
+    pulse.duration = 15000000; // 15 ms
+    pulse.frequency = XR_FREQUENCY_UNSPECIFIED;
+    XrHapticActionInfo info{ XR_TYPE_HAPTIC_ACTION_INFO };
+    info.action = g_xrHapticAction;
+    info.subactionPath = hand ? g_xrRightHandPath : g_xrLeftHandPath;
+    xrApplyHapticFeedback(g_xrSession, &info, reinterpret_cast<const XrHapticBaseHeader*>(&pulse));
+}
+
+// ---- Interaction prompt at the object (own drawing, no HUD dependency) -----
 static void vrUpdatePromptPanel()
 {
     VrXrPanel& p = g_vrPromptPanel;
+    const bool wasVisible = p.visible;
     p.visible = false;
     g_vrPromptVisible = false;
+    static Uint32 lastSeen = 0, lastUid = 0;
+    static std::string lastText;
     XrVector3f head{};
     float headYaw = 0.f;
     if (!vrGameplayHudAllowed() || !vrHeadPose(head, headYaw)) return;
     Player& player = *players[clientnum];
-    Frame* tooltip = player.hud.worldTooltipFrame;
-    if (!tooltip || tooltip->isDisabled() || tooltip->isInvisible()) return;
-    g_vrPromptVisible = player.worldUI.bTooltipInView;
-    Entity* target = player.worldUI.bTooltipInView && player.worldUI.uidForActiveTooltip ?
+    const Uint32 now = SDL_GetTicks();
+    Entity* tip = player.worldUI.uidForActiveTooltip ?
         uidToEntity(player.worldUI.uidForActiveTooltip) : nullptr;
+    if (tip && !player.worldUI.interactText.empty())
+    {
+        g_vrPromptVisible = true;
+        lastSeen = now;
+        lastUid = player.worldUI.uidForActiveTooltip;
+        lastText = player.worldUI.interactText;
+    }
+    else if (wasVisible && lastUid && now - lastSeen < 300)
+        tip = uidToEntity(lastUid); // bridge single-frame gaps: no blinking
+    else
+        tip = nullptr;
     XrVector3f at{};
-    if (!target || !vrBaronyToLocal(*target, head, at)) return;
-    const SDL_Rect anchor = tooltip->getAbsoluteSize();
-    SDL_Rect src{ anchor.x - 260, anchor.y - 90, anchor.w + 520, anchor.h + 200 };
-    src.x = std::max(0, src.x);
-    src.y = std::max(0, src.y);
-    src.w = std::min(Frame::virtualScreenX - src.x, src.w);
-    src.h = std::min(Frame::virtualScreenY - src.y, src.h);
-    if (src.w <= 0 || src.h <= 0) return;
-    constexpr int W = 640, H = 256;
+    if (!tip || lastText.empty() || !vrBaronyToLocal(*tip, head, at)) return;
+    constexpr int W = 512, H = 96;
     if (!vrPanelEnsure(p, W, H, "prompt")) return;
-    const float s = std::min(static_cast<float>(W) / src.w, static_cast<float>(H) / src.h);
-    const SDL_Rect dst{ static_cast<int>((W - src.w * s) / 2), static_cast<int>((H - src.h * s) / 2),
-        static_cast<int>(src.w * s), static_cast<int>(src.h * s) };
-    if (!vrPanelRender(p, [&](GLuint fbo) { vrPanelBlitGui(fbo, H, src, dst); })) return;
-
-    // Slightly in front of the object, never further than 3 m.
-    float vx = at.x - head.x, vy = at.y - head.y, vz = at.z - head.z;
-    const float distance = sqrtf(vx * vx + vy * vy + vz * vz);
-    if (distance < 0.05f) return;
-    const float wanted = std::min(3.f, std::max(0.45f, distance - 0.2f));
-    vx *= wanted / distance; vy *= wanted / distance; vz *= wanted / distance;
-    const XrVector3f centre{ head.x + vx, head.y + vy + 0.05f, head.z + vz };
-    p.layer.space = g_xrReferenceSpace;
-    p.layer.pose.position = centre;
-    p.layer.pose.orientation = vrFacingQuat(centre, head);
-    p.layer.size.width = 0.30f * std::max(1.f, sqrtf(wanted));
-    p.layer.size.height = p.layer.size.width * H / W;
-    p.visible = true;
-}
-
-// ---- Demeo-style hand menu --------------------------------------------------
-enum VrHandAction { VR_HAND_PAUSE, VR_HAND_INVENTORY, VR_HAND_SPELLS, VR_HAND_MAP, VR_HAND_LOG, VR_HAND_COUNT };
-static const char* vrHandLabel(int action)
-{
-    switch (action)
-    {
-    case VR_HAND_INVENTORY: return Language::get(343);  // Inventory
-    case VR_HAND_SPELLS: return Language::get(322);     // Spells
-    case VR_HAND_MAP: return Language::get(5966);       // Map
-    case VR_HAND_LOG: return Language::get(5967);       // Log
-    default: return "";
-    }
-}
-static void vrRunHandAction(int action)
-{
-    if (clientnum < 0 || clientnum >= MAXPLAYERS || !players[clientnum]) return;
-    Player* const p = players[clientnum];
-    printlog("[VR ZF11] hand menu action %d", action);
-    switch (action)
-    {
-    case VR_HAND_PAUSE:
-        vrSendMenuKey(SDLK_ESCAPE, true);
-        vrSendMenuKey(SDLK_ESCAPE, false);
-        break;
-    case VR_HAND_INVENTORY:
-        p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_ITEM);
-        break;
-    case VR_HAND_SPELLS:
-        p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_SPELL);
-        break;
-    case VR_HAND_MAP:
-        openMapWindow(clientnum);
-        break;
-    case VR_HAND_LOG:
-        openLogWindow(clientnum);
-        break;
-    default:
-        break;
-    }
-}
-
-static void vrUpdateHandMenuPanel()
-{
-    VrXrPanel& p = g_vrHandMenuPanel;
-    p.visible = false;
-    const int previousHover = g_vrHandMenuHover;
-    g_vrHandMenuHover = -1;
-    static bool pressLatched = false;
-    const VrControllerHandState& left = g_xrControllerHands[0];
-    const VrControllerHandState& right = g_xrControllerHands[1];
-    const bool rightPressed = right.trigger >= 0.65f || right.primaryButton;
-    if (!rightPressed) pressLatched = false;
-    g_vrHandMenuOwnsRight = pressLatched;
-    XrVector3f head{};
-    float headYaw = 0.f;
-    if (!vrGameplayHudAllowed() || !g_vrWristLook[0] || !left.gripPoseValid ||
-        !vrHeadPose(head, headYaw))
-        return;
-    constexpr int W = 640, H = 128, N = VR_HAND_COUNT;
-    if (!vrPanelEnsure(p, W, H, "handmenu")) return;
-
-    // Above the back of the left hand, nudged toward and facing the eyes.
-    const XrVector3f hand = left.gripPose.position;
-    XrVector3f centre{ hand.x, hand.y + 0.10f, hand.z };
-    const float tx = head.x - centre.x, ty = head.y - centre.y, tz = head.z - centre.z;
-    const float tl = std::max(0.01f, sqrtf(tx * tx + ty * ty + tz * tz));
-    centre = { centre.x + 0.04f * tx / tl, centre.y + 0.04f * ty / tl, centre.z + 0.04f * tz / tl };
-    const XrQuaternionf orientation = vrFacingQuat(centre, head);
-    const float widthM = 0.27f, heightM = widthM * H / W;
-
-    // Right-controller ray hover.
-    if (right.aimPoseValid)
-    {
-        const XrVector3f normal = vrQuatRotate(orientation, { 0.f, 0.f, 1.f });
-        const XrVector3f axisX = vrQuatRotate(orientation, { 1.f, 0.f, 0.f });
-        const XrVector3f axisY = vrQuatRotate(orientation, { 0.f, 1.f, 0.f });
-        const XrVector3f origin = right.aimPose.position;
-        const XrVector3f dir = vrQuatRotate(right.aimPose.orientation, { 0.f, 0.f, -1.f });
-        const float denom = dir.x * normal.x + dir.y * normal.y + dir.z * normal.z;
-        if (std::fabs(denom) > 1e-4f)
-        {
-            const float t = ((centre.x - origin.x) * normal.x + (centre.y - origin.y) * normal.y +
-                (centre.z - origin.z) * normal.z) / denom;
-            if (t > 0.f && t < 2.f)
-            {
-                const XrVector3f hit{ origin.x + t * dir.x - centre.x, origin.y + t * dir.y - centre.y,
-                    origin.z + t * dir.z - centre.z };
-                const float lx = hit.x * axisX.x + hit.y * axisX.y + hit.z * axisX.z;
-                const float ly = hit.x * axisY.x + hit.y * axisY.y + hit.z * axisY.z;
-                if (std::fabs(lx) <= widthM * 0.5f && std::fabs(ly) <= heightM * 0.6f)
-                    g_vrHandMenuHover = std::min(N - 1, static_cast<int>((lx / widthM + 0.5f) * N));
-            }
-        }
-    }
-    if (g_vrHandMenuHover >= 0 && rightPressed && !pressLatched)
-    {
-        pressLatched = true;
-        vrRunHandAction(g_vrHandMenuHover);
-    }
-    g_vrHandMenuOwnsRight = pressLatched || g_vrHandMenuHover >= 0;
-    if (g_vrHandMenuHover != previousHover && g_vrHandMenuHover >= 0 &&
-        g_xrHapticAction != XR_NULL_HANDLE)
-    {
-        XrHapticVibration pulse{ XR_TYPE_HAPTIC_VIBRATION };
-        pulse.amplitude = 0.25f;
-        pulse.duration = 15000000; // 15 ms
-        pulse.frequency = XR_FREQUENCY_UNSPECIFIED;
-        XrHapticActionInfo info{ XR_TYPE_HAPTIC_ACTION_INFO };
-        info.action = g_xrHapticAction;
-        info.subactionPath = g_xrRightHandPath;
-        xrApplyHapticFeedback(g_xrSession, &info,
-            reinterpret_cast<const XrHapticBaseHeader*>(&pulse));
-    }
-
-    const int hover = g_vrHandMenuHover;
+    const bool several = player.worldUI.tooltipsInRange.size() > 1;
     if (!vrPanelRender(p, [&](GLuint) {
             const SDL_Rect viewport{ 0, 0, W, H };
-            Image* base = Image::get("*images/ui/CharSheet/HUD_CharSheet_Button_00.png");
-            Image* high = Image::get("*images/ui/CharSheet/HUD_CharSheet_ButtonHigh_00.png");
-            Image* pause = Image::get("*images/ui/Glyphs/Button_Xbox_Menu_00.png");
             glDisable(GL_DEPTH_TEST);
             glEnable(GL_BLEND);
             glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            for (int i = 0; i < N; ++i)
+            Text* text = Text::get(lastText.c_str(), "fonts/pixel_maz_multiline.ttf#16#2",
+                makeColor(255, 255, 255, 255), makeColor(0, 0, 0, 255));
+            Text* hint = several ? Text::get(Language::get(4326), "fonts/pixel_maz_multiline.ttf#16#2",
+                makeColor(200, 200, 200, 255), makeColor(0, 0, 0, 255)) : nullptr;
+            const int tw = text ? static_cast<int>(text->getWidth()) : 0;
+            const int th = text ? static_cast<int>(text->getHeight()) : 0;
+            const float ts = std::min(2.f, std::min((W - 92.f) / std::max(1, tw), 44.f / std::max(1, th)));
+            const int boxW = std::min(W, 84 + static_cast<int>(tw * ts) + 12);
+            const SDL_Rect box{ (W - boxW) / 2, 4, boxW, hint ? H - 8 : 64 };
+            vrPanelFillRect(box, viewport, makeColor(0, 0, 0, 150));
+            if (Image* glyph = Image::get("*images/ui/Glyphs/Button_Xbox_DarkA_00.png"))
+                glyph->draw(nullptr, SDL_Rect{ box.x + 10, box.y + 6, 52, 52 }, viewport);
+            if (text)
+                text->draw(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ box.x + 72, box.y + 32 - static_cast<int>(th * ts / 2),
+                    static_cast<int>(tw * ts), static_cast<int>(th * ts) }, viewport);
+            if (hint)
             {
-                const SDL_Rect cell{ i * (W / N) + 4, 8, W / N - 8, H - 16 };
-                Image* back = (i == hover && high) ? high : base;
-                if (back) back->draw(nullptr, cell, viewport);
-                if (i == VR_HAND_PAUSE)
-                {
-                    if (pause)
-                    {
-                        const int size = std::min(cell.w, cell.h) - 36;
-                        pause->draw(nullptr, SDL_Rect{ cell.x + (cell.w - size) / 2,
-                            cell.y + (cell.h - size) / 2, size, size }, viewport);
-                    }
-                    continue;
-                }
-                const char* label = vrHandLabel(i);
-                if (!label || !label[0]) continue;
-                Text* text = Text::get(label, "fonts/pixel_maz_multiline.ttf#16#2",
-                    makeColor(255, 255, 255, 255), makeColor(0, 0, 0, 255));
-                if (!text) continue;
-                const int tw = static_cast<int>(text->getWidth());
-                const int th = static_cast<int>(text->getHeight());
-                const float ts = std::min(1.6f, (cell.w - 10.f) / std::max(1, tw));
-                const SDL_Rect dst{ cell.x + static_cast<int>((cell.w - tw * ts) / 2),
-                    cell.y + static_cast<int>((cell.h - th * ts) / 2),
-                    static_cast<int>(tw * ts), static_cast<int>(th * ts) };
-                text->draw(SDL_Rect{ 0, 0, tw, th }, dst, viewport);
+                const int hw = static_cast<int>(hint->getWidth()), hh = static_cast<int>(hint->getHeight());
+                hint->draw(SDL_Rect{ 0, 0, hw, hh }, SDL_Rect{ box.x + 72, box.y + 62, hw, hh }, viewport);
             }
         }))
         return;
-    p.layer.space = g_xrReferenceSpace;
-    p.layer.pose.position = centre;
-    p.layer.pose.orientation = orientation;
-    p.layer.size.width = widthM;
-    p.layer.size.height = heightM;
+    // ZF16: horizontally at the object (a little in front of it), but kept
+    // within eye-level band: wall levers and floor items reported tooltip
+    // heights up to ~1.3 m below the eyes, i.e. out of view.
+    float vx = at.x - head.x, vy = at.y - head.y, vz = at.z - head.z;
+    const float horizontal = sqrtf(vx * vx + vz * vz);
+    if (horizontal < 0.05f) return;
+    const float wanted = std::min(2.6f, std::max(0.45f, horizontal - 0.15f));
+    vx *= wanted / horizontal; vz *= wanted / horizontal;
+    vy = std::max(-0.45f, std::min(0.05f, vy));
+    vrPanelSetFacing(p, { head.x + vx, head.y + vy, head.z + vz }, head,
+        0.22f * std::max(1.f, sqrtf(wanted)));
+    p.visible = true;
+}
+
+// ---- Wrist panels (Demeo-style, shown with the watch gesture) ---------------
+// Left wrist: health/mana + status effects and four small shortcuts.
+// Right wrist: minimap. Both sit beside the wrist on the side toward the
+// eyes (the inner side of the arm) and face the player.
+enum VrWristAction { VR_WRIST_MENU, VR_WRIST_INVENTORY, VR_WRIST_SPELLS, VR_WRIST_MAP, VR_WRIST_COUNT };
+static VrXrPanel g_vrRightWristPanel;
+static void vrRunWristAction(int action)
+{
+    if (clientnum < 0 || clientnum >= MAXPLAYERS || !players[clientnum]) return;
+    Player* const p = players[clientnum];
+    printlog("[VR ZF15] wrist shortcut %d", action);
+    switch (action)
+    {
+    case VR_WRIST_MENU: g_xrVrMenuPulseUntilMs = SDL_GetTicks() + 125; break; // native Start/Pause
+    case VR_WRIST_INVENTORY: p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_ITEM); break;
+    case VR_WRIST_SPELLS: p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_SPELL); break;
+    case VR_WRIST_MAP: openMapWindow(clientnum); break;
+    default: break;
+    }
+}
+
+static XrVector3f vrWristAnchor(const XrVector3f& wrist, const XrVector3f& head, float toward, float up)
+{
+    const float tx = head.x - wrist.x, tz = head.z - wrist.z;
+    const float tl = std::max(0.01f, sqrtf(tx * tx + tz * tz));
+    return { wrist.x + toward * tx / tl, wrist.y + up, wrist.z + toward * tz / tl };
+}
+
+// ZF16: ONE wrist panel on the hand that made the watch gesture: effects,
+// health/mana, minimap and four shortcuts. The other hand points at it; a
+// cursor shows where its ray lands, trigger (or A / X) presses a shortcut.
+
+static void vrUpdateWristPanel()
+{
+    VrXrPanel& p = g_vrHandMenuPanel;
+    const bool wasVisible = p.visible;
+    p.visible = false;
+    g_vrRightWristPanel.visible = false;
+    const int previousHover = g_vrHandMenuHover;
+    g_vrHandMenuHover = -1;
+    static bool pressLatched = false;
+    static Uint32 shownSince = 0;
+    const int panelHand = g_vrWristLook[0] ? 0 : (g_vrWristLook[1] ? 1 : -1);
+    const int pointerHand = panelHand < 0 ? -1 : 1 - panelHand;
+    const VrControllerHandState* pointer = pointerHand >= 0 ? &g_xrControllerHands[pointerHand] : nullptr;
+    const bool pressed = pointer && (pointer->trigger >= 0.65f || pointer->primaryButton);
+    if (!pressed) pressLatched = false;
+    g_vrHandMenuOwnsRight = pressLatched && pointerHand == 1;
+    g_vrHandMenuOwnsLeft = pressLatched && pointerHand == 0;
+    XrVector3f head{};
+    float headYaw = 0.f;
+    if (panelHand < 0 || !vrGameplayHudAllowed() ||
+        !g_xrControllerHands[panelHand].gripPoseValid || !vrHeadPose(head, headYaw))
+        return;
+    auto& hud = players[clientnum]->hud;
+    if (!hud.hpFrame || !hud.mpFrame) return;
+    constexpr int W = 512, H = 320, N = VR_WRIST_COUNT, ButtonsTop = 166, MapX = 308;
+    if (!vrPanelEnsure(p, W, H, "wrist")) return;
+    const Uint32 now = SDL_GetTicks();
+    if (!wasVisible) shownSince = now;
+    vrPanelSetFacing(p, vrWristAnchor(g_xrControllerHands[panelHand].gripPose.position, head, 0.06f, 0.08f),
+        head, 0.15f);
+
+    float u = -1.f, v = -1.f;
+    const bool rayOnPanel = pointer && pointer->aimPoseValid && vrPanelRayUV(p, pointer->aimPose, u, v);
+    if (rayOnPanel && now - shownSince > 300 && v * H >= ButtonsTop)
+        g_vrHandMenuHover = std::min(N - 1, static_cast<int>(u * N));
+    if (g_vrHandMenuHover >= 0 && pressed && !pressLatched)
+    {
+        pressLatched = true;
+        vrRunWristAction(g_vrHandMenuHover);
+    }
+    const bool owns = pressLatched || rayOnPanel;
+    g_vrHandMenuOwnsRight = owns && pointerHand == 1;
+    g_vrHandMenuOwnsLeft = owns && pointerHand == 0;
+    if (g_vrHandMenuHover != previousHover && g_vrHandMenuHover >= 0) vrHaptic(pointerHand, 0.25f);
+
+    const SDL_Rect hp = hud.hpFrame->getAbsoluteSize(), mp = hud.mpFrame->getAbsoluteSize();
+    const SDL_Rect bars{ std::min(hp.x, mp.x), std::min(hp.y, mp.y),
+        std::max(hp.x + hp.w, mp.x + mp.w) - std::min(hp.x, mp.x),
+        std::max(hp.y + hp.h, mp.y + mp.h) - std::min(hp.y, mp.y) };
+    SDL_Rect effects{};
+    const bool hasEffects = vrGetStatusEffectCaptureArea(effects) && effects.w > 0 && effects.h > 0;
+    Frame* minimap = hud.minimapFrame;
+    const bool hasMap = minimap && !minimap->isInvisible() && !minimap->isDisabled() &&
+        minimap->getAbsoluteSize().w > 0 && minimap->getAbsoluteSize().h > 0;
+    const int hover = g_vrHandMenuHover;
+    vrPanelRender(p, [&](GLuint fbo) {
+        const SDL_Rect viewport{ 0, 0, W, H };
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        vrPanelFillRect(SDL_Rect{ 0, 0, W, ButtonsTop - 6 }, viewport, makeColor(0, 0, 0, 90));
+        if (bars.w > 0 && bars.h > 0)
+        {
+            const float s = std::min((MapX - 12.f) / bars.w, 110.f / bars.h);
+            vrPanelBlitGui(fbo, H, bars, SDL_Rect{ 6, 46, static_cast<int>(bars.w * s), static_cast<int>(bars.h * s) });
+        }
+        if (hasEffects)
+        {
+            const float s = std::min((MapX - 12.f) / effects.w, 38.f / effects.h);
+            vrPanelBlitGui(fbo, H, effects, SDL_Rect{ 6, 4, static_cast<int>(effects.w * s), static_cast<int>(effects.h * s) });
+        }
+        if (hasMap)
+        {
+            const SDL_Rect src = minimap->getAbsoluteSize();
+            const float s = std::min((W - MapX - 4.f) / src.w, (ButtonsTop - 10.f) / src.h);
+            const int mw = static_cast<int>(src.w * s), mh = static_cast<int>(src.h * s);
+            vrPanelBlitGui(fbo, H, src, SDL_Rect{ MapX + (W - MapX - mw) / 2, 2, mw, mh });
+        }
+        Image* base = Image::get("*images/ui/CharSheet/HUD_CharSheet_Button_00.png");
+        Image* high = Image::get("*images/ui/CharSheet/HUD_CharSheet_ButtonHigh_00.png");
+        Image* menu = Image::get("*images/ui/Glyphs/Button_Xbox_Menu_00.png");
+        const int labels[VR_WRIST_COUNT] = { 0, 343, 322, 5966 };
+        for (int i = 0; i < N; ++i)
+        {
+            const SDL_Rect cell{ i * (W / N) + 3, ButtonsTop, W / N - 6, H - ButtonsTop - 4 };
+            Image* back = (i == hover && high) ? high : base;
+            if (back) back->draw(nullptr, cell, viewport);
+            if (i == VR_WRIST_MENU)
+            {
+                if (menu)
+                {
+                    const int size = std::min(cell.w, cell.h) - 40;
+                    menu->draw(nullptr, SDL_Rect{ cell.x + (cell.w - size) / 2, cell.y + (cell.h - size) / 2,
+                        size, size }, viewport);
+                }
+                continue;
+            }
+            Text* text = Text::get(Language::get(labels[i]), "fonts/pixel_maz_multiline.ttf#16#2",
+                makeColor(255, 255, 255, 255), makeColor(0, 0, 0, 255));
+            if (!text) continue;
+            const int tw = static_cast<int>(text->getWidth()), th = static_cast<int>(text->getHeight());
+            const float ts = std::min(1.5f, (cell.w - 8.f) / std::max(1, tw));
+            text->draw(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ cell.x + static_cast<int>((cell.w - tw * ts) / 2),
+                cell.y + static_cast<int>((cell.h - th * ts) / 2), static_cast<int>(tw * ts),
+                static_cast<int>(th * ts) }, viewport);
+        }
+        // Pointer feedback: Barony's own hand cursor where the ray lands.
+        if (rayOnPanel)
+        {
+            if (Image* cursor = Image::get(g_xrMenuCursorImagePath))
+                cursor->draw(nullptr, SDL_Rect{ static_cast<int>(u * W) - 22, static_cast<int>(v * H) - 22, 44, 44 },
+                    viewport);
+        }
+    });
     p.visible = true;
 }
 
@@ -15984,9 +16175,9 @@ static void vrUpdateExtraPanels()
     const Uint32 now = SDL_GetTicks();
     const float dt = last ? std::min(0.1f, (now - last) / 1000.f) : 0.016f;
     last = now;
-    // ZF13: VR uses Barony's linear hotbar (grip taps = previous / next slot,
-    // Y or right stick up = equip). The gamepad face-button groups need a
-    // held X/Y/B plus LB/RB, which has no comfortable VR equivalent.
+    // ZF13: VR uses Barony's linear hotbar, picked by pointing at a slot
+    // (ZF15). The gamepad face-button groups need a held X/Y/B plus LB/RB,
+    // which has no comfortable VR equivalent.
     if (clientnum >= 0 && clientnum < MAXPLAYERS && players[clientnum])
     {
         playerSettings[multiplayer ? 0 : clientnum].gamepad_facehotbar = false;
@@ -15995,7 +16186,7 @@ static void vrUpdateExtraPanels()
     vrTestWritePose();
     vrUpdateHotbarPanel(dt);
     vrUpdatePromptPanel();
-    vrUpdateHandMenuPanel();
+    vrUpdateWristPanel();
     g_vrHotbarPanelActive = g_vrHotbarPanel.visible;
     g_vrPromptPanelActive = g_vrPromptPanel.visible;
 }
@@ -16003,7 +16194,7 @@ static void vrUpdateExtraPanels()
 static uint32_t vrAppendExtraLayers(const XrCompositionLayerBaseHeader** layers,
     uint32_t count, uint32_t maxCount)
 {
-    VrXrPanel* panels[] = { &g_vrHotbarPanel, &g_vrPromptPanel, &g_vrHandMenuPanel };
+    VrXrPanel* panels[] = { &g_vrHotbarPanel, &g_vrPromptPanel, &g_vrHandMenuPanel, &g_vrRightWristPanel };
     for (VrXrPanel* p : panels)
         if (p->visible && p->swapchain != XR_NULL_HANDLE && count < maxCount)
             layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&p->layer);
@@ -16021,9 +16212,9 @@ static void vrDebugWritePanelState(FILE* file)
     const XrQuaternionf inv{ -q.x, -q.y, -q.z, q.w };
     std::fprintf(file, "    headQ=(%.3f %.3f %.3f %.3f) headPos=(%.2f %.2f %.2f)\n",
         q.x, q.y, q.z, q.w, head.x, head.y, head.z);
-    VrXrPanel* panels[] = { &g_vrHotbarPanel, &g_vrPromptPanel, &g_vrHandMenuPanel };
-    const char* names[] = { "hotbar", "prompt", "handmenu" };
-    for (int i = 0; i < 3; ++i)
+    VrXrPanel* panels[] = { &g_vrHotbarPanel, &g_vrPromptPanel, &g_vrHandMenuPanel, &g_vrRightWristPanel };
+    const char* names[] = { "hotbar", "prompt", "leftwrist", "rightwrist" };
+    for (int i = 0; i < 4; ++i)
     {
         const VrXrPanel& p = *panels[i];
         if (!p.visible) continue;
@@ -16036,6 +16227,9 @@ static void vrDebugWritePanelState(FILE* file)
         std::fprintf(file, "    %s head=(%.2f %.2f %.2f) yaw=%.0f pitch=%.0f facing=%.2f size=%.2fx%.2f hover=%d\n",
             names[i], h.x, h.y, h.z, atan2f(h.x, -h.z) * 57.3f, atan2f(h.y, sqrtf(h.x * h.x + h.z * h.z)) * 57.3f,
             facing, p.layer.size.width, p.layer.size.height, i == 2 ? g_vrHandMenuHover : -1);
+        if (i == 0)
+            std::fprintf(file, "      hotbarRay u=%.2f v=%.2f slot=%.0f\n",
+                g_vrDebugHotbarUV[0], g_vrDebugHotbarUV[1], g_vrDebugHotbarUV[2]);
     }
 }
 

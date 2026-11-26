@@ -29,6 +29,9 @@
 // STEP 621: One explicit VR mouse owner during Barony UI interaction.
 // Defined in vr_openxr.cpp; does not take over combat or non-VR input.
 extern bool vrMenuLaserOwnsMouse(int player);
+// ZF15: head-based interaction selection in VR (vr_openxr.cpp).
+extern real_t vrInteractYaw(int player, real_t bodyYaw);
+extern real_t vrInteractAngle(int player, real_t angle);
 
 #ifdef NINTENDO
 #include "nintendo/baronynx.hpp"
@@ -3557,7 +3560,9 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 		{
 			tangent += 2 * PI;
 		}
-		real_t playerYaw = playerEntity->yaw;
+		// ZF15: in VR the interaction cone follows the HEAD (the native body yaw
+		// only turns with the stick), and is a little wider.
+		real_t playerYaw = vrInteractYaw(player.playernum, playerEntity->yaw);
 		while ( playerYaw >= 2 * PI )
 		{
 			playerYaw -= 2 * PI;
@@ -3781,6 +3786,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 			}
 		}
 
+		interactAngle = vrInteractAngle(player.playernum, interactAngle);
 		if ( (abs(tangent - playerYaw) < (interactAngle)) || (abs(tangent - playerYaw) > (2 * PI - interactAngle)) )
 		{
 			//messagePlayer(0, "%.2f", tangent - playerYaw);
