@@ -15893,6 +15893,9 @@ struct VrXrPanel
     XrCompositionLayerQuad layer{ XR_TYPE_COMPOSITION_LAYER_QUAD };
     bool visible = false;
     bool failed = false;
+    // ZF27: the layer is always submitted once the panel exists; while hidden
+    // it shows a transparent image (clearShown) instead of leaving the list.
+    bool released = false, clearShown = false;
     const char* name = "";
 };
 static VrXrPanel g_vrHotbarPanel, g_vrPromptPanel, g_vrHandMenuPanel, g_vrMessagePanel;
@@ -15937,6 +15940,7 @@ static bool vrPanelEnsure(VrXrPanel& p, int width, int height, const char* name)
     p.layer.subImage.imageRect.extent = { width, height };
     p.layer.subImage.imageArrayIndex = 0;
     p.layer.pose.orientation.w = 1.f;
+    p.layer.size = { 0.01f, 0.01f }; // ZF27: valid even before its first placement
     printlog("[VR ZF11] %s panel ready (%dx%d)", name, width, height);
     return true;
 }
@@ -15985,7 +15989,7 @@ static bool vrPanelRender(VrXrPanel& p, DrawFn&& draw)
     glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousRead));
     if (fbo) glDeleteFramebuffers(1, &fbo);
     XrSwapchainImageReleaseInfo release{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-    xrReleaseSwapchainImage(p.swapchain, &release);
+    if (XR_SUCCEEDED(xrReleaseSwapchainImage(p.swapchain, &release))) p.released = true;
     return ok;
 }
 
@@ -16815,10 +16819,24 @@ static void vrUpdateExtraPanels()
         }
     }
     vrTestWritePose();
+    // ZF27: create every gameplay panel up front, so the set of submitted
+    // layers never changes while playing (see vrAppendExtraLayers).
+    if (vrGameplayHudAllowed())
+    {
+        vrPanelEnsure(g_vrMessagePanel, 1024, 320, "messages");
+        if (vrHotbarAtViewBottom()) vrPanelEnsure(g_vrHotbarPanel, 1024, 200, "hotbar");
+        vrPanelEnsure(g_vrPromptPanel, 512, 96, "prompt");
+    }
     vrUpdateHotbarPanel(dt);
     vrUpdateMessagePanel();
     vrUpdatePromptPanel();
     vrUpdateWristPanel();
+    // ZF27: a hidden panel keeps its layer slot with a transparent image.
+    for (VrXrPanel* panel : { &g_vrMessagePanel, &g_vrHotbarPanel, &g_vrPromptPanel, &g_vrHandMenuPanel })
+    {
+        if (panel->visible || panel->swapchain == XR_NULL_HANDLE) { panel->clearShown = false; continue; }
+        if (!panel->clearShown && vrPanelRender(*panel, [](GLuint) {})) panel->clearShown = true;
+    }
     g_vrHotbarPanelActive = g_vrHotbarPanel.visible;
     // ZF26: log panel visibility changes and the hotbar crop (diagnosis of
     // "the hotbar disappears while subtitles show").
@@ -16844,8 +16862,14 @@ static uint32_t vrAppendExtraLayers(const XrCompositionLayerBaseHeader** layers,
 {
     VrXrPanel* panels[] = { &g_vrMessagePanel, &g_vrHotbarPanel, &g_vrPromptPanel,
         g_vrWristRenderWorld ? &g_vrRightWristPanel : &g_vrHandMenuPanel, &g_vrRightWristPanel }; // ZF23
+    // ZF27: submit EVERY existing panel, always in this order, hidden ones with
+    // a transparent image. Adding/removing quad layers from frame to frame made
+    // the SteamVR compositor show one layer's image with another's pose for a
+    // few frames: the hotbar inside the prompt near its range limit, a bigger
+    // hotbar next to new subtitles, a cut-off wrist panel.
     for (VrXrPanel* p : panels)
-        if (p->visible && p->swapchain != XR_NULL_HANDLE && count < maxCount)
+        if (p->swapchain != XR_NULL_HANDLE && p->released && (p->visible || p->clearShown) &&
+            count < maxCount)
             layers[count++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&p->layer);
     return count;
 }
