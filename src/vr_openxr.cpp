@@ -587,9 +587,9 @@ static bool vrCharacterCreationLobbyActive()
 // VR virtual gamepad to the local slot only after Barony has opened it and
 // only when that slot does not already own a controller. Do not touch other
 // gamepads or take a controller away from another splitscreen player.
-static void vrBindVirtualControllerInLobby()
+static void vrBindVirtualControllerInLobby(bool anywhere = false)
 {
-    if (!vrCharacterCreationLobbyActive() || !g_xrVirtualSDLJoystick ||
+    if ((!anywhere && !vrCharacterCreationLobbyActive()) || !g_xrVirtualSDLJoystick ||
         clientnum < 0 || clientnum >= MAXPLAYERS ||
         inputs.hasController(clientnum))
         return;
@@ -770,6 +770,7 @@ static bool g_vrHandMenuOwnsRight = false;   // right trigger/A belong to the ha
 static bool g_vrHandMenuOwnsLeft = false;    // ZF16: left trigger/X point at the wrist panel
 static bool g_vrHotbarOwnsTrigger[2] = { false, false }; // ZF15: trigger aimed at the hotbar
 static Uint32 g_vrHotbarEquipPulseUntil = 0;  // ZF15: virtual Y pulse = equip slot
+static float g_vrHotbarCursorU = -1.f, g_vrHotbarCursorV = -1.f; // ZF18: ray cursor on the hotbar
 static bool g_vrCallOutPulse = false, g_vrNextInteractPulse = false; // ZF15: L3 / R3 taps
 static float g_vrDebugHotbarUV[3] = { -1.f, -1.f, -1.f }; // u, v, slot (debug)
 struct VrXrPanel;
@@ -4109,6 +4110,11 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         return;
     }
 
+    // ZF18: joining the lobby with Space (KeyboardLogin) makes Barony drop
+    // the player's controller; the VR pad was only re-bound while the lobby
+    // was open, so sticks could stop moving/turning in game (quick turn is a
+    // direct call and kept working). Re-bind it whenever it is missing.
+    if (useInput && !intro) vrBindVirtualControllerInLobby(true);
     // Blend analog locomotion with the optional Standing room-scale input.
     // Both pass through Barony's normal movement/collision path.
     auto limitStick = [](float v) { return v < -1.f ? -1.f : (v > 1.f ? 1.f : v); };
@@ -15737,6 +15743,16 @@ static void vrUpdateHotbarPanel(float dt)
     if (!vrPanelRender(p, [&](GLuint fbo) {
             vrPanelBlitGui(fbo, H, hotbar, hotbarDst);
             if (chatDst.w > 0) vrPanelBlitGui(fbo, H, chat, chatDst);
+            // ZF18: Barony's hand cursor where a controller ray lands (last frame).
+            if (g_vrHotbarCursorU >= 0.f)
+            {
+                glDisable(GL_DEPTH_TEST);
+                glEnable(GL_BLEND);
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                if (Image* cursor = Image::get(g_xrMenuCursorImagePath))
+                    cursor->draw(nullptr, SDL_Rect{ static_cast<int>(g_vrHotbarCursorU * W) - 26,
+                        static_cast<int>(g_vrHotbarCursorV * H) - 26, 52, 52 }, SDL_Rect{ 0, 0, W, H });
+            }
         }))
         return;
 
@@ -15767,47 +15783,69 @@ static void vrUpdateHotbarPanel(float dt)
     p.layer.size.height = width * H / W;
     p.visible = true;
 
-    // ZF15: point at a slot with either controller; its trigger equips it
-    // (Barony "Hotbar Up / Select"). Hovering selects the slot so Barony's
-    // own highlight and tooltip show which item will be equipped.
+    // ZF15/ZF18: point at a slot with either controller; its trigger equips
+    // it (Barony "Hotbar Up / Select", the same use/equip/unequip as the
+    // number keys). The ray picks the NEAREST slot anywhere in the hotbar
+    // row, the choice survives ~250 ms off the row (squeezing the trigger
+    // tilts the controller), and a cursor shows where the ray lands.
     static bool triggerWasDown[2] = { false, false };
-    static int lastHover = -1;
+    static int lastHover = -1, stickySlot = -1, stickyHand = -1;
+    static Uint32 stickyUntil = 0;
+    const Uint32 nowTicks = SDL_GetTicks();
     int hoverSlot = -1, hoverHand = -1;
     g_vrDebugHotbarUV[0] = g_vrDebugHotbarUV[1] = -1.f;
+    g_vrHotbarCursorU = g_vrHotbarCursorV = -1.f;
     for (int hand = 1; hand >= 0 && hoverSlot < 0; --hand)
     {
         const VrControllerHandState& c = g_xrControllerHands[hand];
         float u = 0.f, v = 0.f;
         if (!c.aimPoseValid || !vrPanelRayUV(p, c.aimPose, u, v)) continue;
+        if (g_vrHotbarCursorU < 0.f) { g_vrHotbarCursorU = u; g_vrHotbarCursorV = v; }
         if (hand == 1) { g_vrDebugHotbarUV[0] = u; g_vrDebugHotbarUV[1] = v; }
         const float vx = hotbar.x + (u * W - hotbarDst.x) / hs;
         const float vy = hotbar.y + (v * H - hotbarDst.y) / hs;
+        float best = 1e9f;
         for (int slot = 0; slot < static_cast<int>(NUM_HOTBAR_SLOTS); ++slot)
         {
             Frame* frame = players[clientnum]->hotbar.getHotbarSlotFrame(slot);
             if (!frame || frame->isDisabled()) continue;
             const SDL_Rect r = frame->getAbsoluteSize();
-            if (vx >= r.x - 2 && vx < r.x + r.w + 2 && vy >= r.y - 6 && vy < r.y + r.h + 6)
+            if (vy < r.y - r.h * 0.6f || vy > r.y + r.h * 1.6f) continue; // outside the row band
+            const float dx = std::fabs(vx - (r.x + r.w * 0.5f));
+            if (dx < best && dx < r.w * 1.0f)
             {
+                best = dx;
                 hoverSlot = slot;
                 hoverHand = hand;
-                break;
             }
         }
     }
+    if (hoverSlot >= 0)
+    {
+        stickySlot = hoverSlot;
+        stickyHand = hoverHand;
+        stickyUntil = nowTicks + 250;
+    }
+    else if (stickySlot >= 0 && static_cast<Sint32>(stickyUntil - nowTicks) > 0)
+    {
+        hoverSlot = stickySlot;
+        hoverHand = stickyHand;
+    }
+    else
+        stickySlot = -1;
     for (int hand = 0; hand < 2; ++hand)
     {
         const bool down = g_xrControllerHands[hand].trigger >= 0.65f;
         if (!down) g_vrHotbarOwnsTrigger[hand] = false;
         if (hand == hoverHand)
         {
-            g_vrHotbarOwnsTrigger[hand] = g_vrHotbarOwnsTrigger[hand] || true;
+            g_vrHotbarOwnsTrigger[hand] = true;
             if (down && !triggerWasDown[hand])
             {
                 players[clientnum]->hotbar.selectHotbarSlot(hoverSlot);
-                g_vrHotbarEquipPulseUntil = SDL_GetTicks() + 90;
+                g_vrHotbarEquipPulseUntil = nowTicks + 120;
                 vrHaptic(hand, 0.4f);
-                printlog("[VR ZF15] hotbar slot %d equipped with the %s trigger", hoverSlot + 1, hand ? "right" : "left");
+                printlog("[VR ZF15] hotbar slot %d used with the %s trigger", hoverSlot + 1, hand ? "right" : "left");
             }
         }
         triggerWasDown[hand] = down;
@@ -15994,7 +16032,24 @@ static void vrRunWristAction(int action)
     printlog("[VR ZF15] wrist shortcut %d", action);
     switch (action)
     {
-    case VR_WRIST_MENU: g_xrVrMenuPulseUntilMs = SDL_GetTicks() + 125; break; // native Start/Pause
+    case VR_WRIST_MENU:
+        // ZF18: open the pause menu the way Barony's own UI does (see
+        // interface.cpp): pauseGame() only picks the menu owner from whichever
+        // input is holding "Pause Game" at that instant; from a shortcut that
+        // left a stale owner (e.g. another player slot), so the game paused
+        // with its menu built for someone else - invisible, input blocked.
+        if (!gamePaused && !intro)
+        {
+            p->closeAllGUIs(CLOSEGUI_ENABLE_SHOOTMODE, CLOSEGUI_CLOSE_ALL);
+            pauseGame(2, MAXPLAYERS);
+            if (gamePaused)
+            {
+                MainMenu::pause_menu_owner = clientnum;
+                if (MainMenu::main_menu_frame) MainMenu::destroyMainMenu();
+                MainMenu::createMainMenu(true);
+            }
+        }
+        break;
     case VR_WRIST_INVENTORY: p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_ITEM); break;
     case VR_WRIST_SPELLS: p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_SPELL); break;
     case VR_WRIST_MAP: openMapWindow(clientnum); break;
@@ -16073,7 +16128,6 @@ static void vrUpdateWristPanel()
         glDisable(GL_DEPTH_TEST);
         glEnable(GL_BLEND);
         glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-        vrPanelFillRect(SDL_Rect{ 0, 0, W, ButtonsTop - 6 }, viewport, makeColor(0, 0, 0, 90));
         if (bars.w > 0 && bars.h > 0)
         {
             const float s = std::min((MapX - 12.f) / bars.w, 110.f / bars.h);
