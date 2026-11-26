@@ -16,8 +16,11 @@ $null = Start-Process -FilePath 'D:\Workspace\BaronyVR-deps\build\barony.exe' -W
 $state = "$R\vr_debug\state.txt"
 $deadline = (Get-Date).AddSeconds(60)
 while ((Get-Date) -lt $deadline -and ((Get-Content $state -ErrorAction SilentlyContinue).Count -lt 18)) { Start-Sleep 1 }
-for ($try = 0; $try -lt 2 -and -not (Test-Path "$R\vr_debug\pose.txt"); $try++) {
-    & D:\Workspace\BaronyVR-deps\keys.ps1 -Keys space,sleep:2500,"mouse:1700,520","mouse:1720,532",sleep:1500,"mouse:1866,678",sleep:1500,"mouse:1570,409",sleep:6000,"mouse:430,1304" -Wait 1 | Out-Null
+for ($try = 0; $try -lt 1 -and -not (Test-Path "$R\vr_debug\pose.txt"); $try++) {
+    # Title (Space) -> Start game -> Start (right) -> Local adventure; the
+    # BARONYVR_TEST_LOBBY_A hook joins, then a simulated A presses "ready".
+    & D:\Workspace\BaronyVR-deps\keys.ps1 -Keys space,sleep:2500,space,sleep:1500,right,sleep:400,space,sleep:1500,space,sleep:6000 -Wait 1 | Out-Null
+    & D:\Workspace\BaronyVR-deps\vrinput.ps1 -Set "R a 1" -HoldMs 200 -After "R a 0" -Wait 0 | Out-Null
     $deadline = (Get-Date).AddSeconds(25)
     while ((Get-Date) -lt $deadline -and -not (Test-Path "$R\vr_debug\pose.txt")) { Start-Sleep 1 }
 }

@@ -17,8 +17,9 @@ CONTROLES EN PARTIDA (mandos Quest)
   A .................... Usar / interactuar
   B .................... Lanzar hechizo
   X / Y ................ Libres (inventario, hechizos, mapa y pausa: panel de la muneca)
-  Clic stick izq. ...... Llamar a los aliados
-  Clic stick der. ...... Siguiente interaccion (si hay varias cerca)
+  Clic de un stick ..... Con una interaccion al alcance: siguiente interaccion.
+                         Sin ninguna: stick izq. = gestos (Call Out, tecla X),
+                         stick der. = ordenes a aliados (tecla C).
   Stick izquierdo ...... Moverse
   Stick der. izq/der ... Girar     Stick der. abajo ... Giro rapido 180
   Gatillo izquierdo .... Defender / sigilo

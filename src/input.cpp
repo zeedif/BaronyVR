@@ -900,13 +900,31 @@ void Input::bind(const char* binding, const char* input) {
 	}
 }
 
+bool (*g_vrActionHook)(int player, const char* action, float& analog) = nullptr;
+const std::vector<std::string>* (*g_vrActionNamesHook)(int player) = nullptr;
+
 void Input::update() {
+	// ZF19: make sure every injectable action exists for this player, even when
+	// the current device type has no binding for it (e.g. GamepadLoginA while
+	// on keyboard), so an injected press is seen by the usual binary checks.
+	if (g_vrActionNamesHook) {
+		if (const auto* names = g_vrActionNamesHook(player)) {
+			for (const auto& name : *names) {
+				bindings[name];
+			}
+		}
+	}
 	for (auto& pair : bindings) {
 		auto& binding = pair.second;
 		//const float oldAnalog = binding.analog;
 		binding.analog = analogOf(binding);
 		const bool oldBinary = binding.binary;
 		binding.binary = binaryOf(binding);
+		float injected = 0.f;
+		if (g_vrActionHook && g_vrActionHook(player, pair.first.c_str(), injected)) {
+			binding.binary = true;
+			binding.analog = std::max(binding.analog, injected);
+		}
 		if (oldBinary != binding.binary) {
 			if (binding.binary) {
 				if (binding.heldTicks == 0) {

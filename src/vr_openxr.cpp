@@ -31,6 +31,8 @@
 #include "draw.hpp"
 #include "ui/Image.hpp"
 #include "ui/Text.hpp" // ZF11: hand-menu labels.
+#include "input.hpp" // ZF19: action injection hooks.
+#include <unordered_map>
 #include "shader.hpp"
 #include "vr_native_hud.hpp"
 #include "ui/Frame.hpp" // STEP638EI: real HP/MP and minimap frame rectangles.
@@ -633,8 +635,8 @@ static bool vrLocalLobbyAwaitingLogin()
         return false;
     Frame* lobby = MainMenu::main_menu_frame->findFrame("lobby");
     if (!lobby) return false;
-    const int localPlayer = multiplayer == SINGLE ?
-        inputs.getPlayerIDAllowedKeyboard() : clientnum;
+    // ZF19: only this headset's own card (other local slots keep their own input).
+    const int localPlayer = clientnum;
     if (localPlayer < 0 || localPlayer >= MAXPLAYERS) return false;
     Frame* card = lobby->findFrame((std::string("card") + std::to_string(localPlayer)).c_str());
     return card && card->findField("start") != nullptr;
@@ -771,6 +773,31 @@ static bool g_vrHandMenuOwnsLeft = false;    // ZF16: left trigger/X point at th
 static bool g_vrHotbarOwnsTrigger[2] = { false, false }; // ZF15: trigger aimed at the hotbar
 static Uint32 g_vrHotbarEquipPulseUntil = 0;  // ZF15: virtual Y pulse = equip slot
 static float g_vrHotbarCursorU = -1.f, g_vrHotbarCursorV = -1.f; // ZF18: ray cursor on the hotbar
+// ZF19: actions injected into Barony's Input layer (see input.cpp). Rebuilt each
+// frame by the VR mapping; read by Input::update() for the local player.
+static std::unordered_map<std::string, float> g_vrActionsNow;
+static Uint32 g_vrActionsTicks = 0; // when the set was rebuilt; stale sets are ignored
+static const std::vector<std::string> g_vrActionNames = {
+    "Use", "Cast Spell", "Hotbar Up / Select", "Interact Tooltip Next",
+    "Call Out", "Show NPC Commands", "GamepadLoginA" };
+static int vrActionInputPlayer() { return multiplayer != SINGLE ? 0 : clientnum; }
+static void vrAction(const char* name, bool on, float analog = 1.f)
+{
+    if (on) g_vrActionsNow[name] = analog;
+}
+static bool vrActionHook(int player, const char* action, float& analog)
+{
+    if (g_vrActionsNow.empty() || player != vrActionInputPlayer() ||
+        SDL_GetTicks() - g_vrActionsTicks > 200) return false;
+    const auto it = g_vrActionsNow.find(action);
+    if (it == g_vrActionsNow.end()) return false;
+    analog = it->second;
+    return true;
+}
+static const std::vector<std::string>* vrActionNamesHook(int player)
+{
+    return player == vrActionInputPlayer() ? &g_vrActionNames : nullptr;
+}
 static bool g_vrCallOutPulse = false, g_vrNextInteractPulse = false; // ZF15: L3 / R3 taps
 static float g_vrDebugHotbarUV[3] = { -1.f, -1.f, -1.f }; // u, v, slot (debug)
 struct VrXrPanel;
@@ -1256,11 +1283,14 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     if (testLobbyAFrames > 0) --testLobbyAFrames;
     const bool lobbyLoginDown = menuPresent && primaryPressed &&
         (lobbyLoginWasDown || awaitingLogin);
+    // ZF19: inject Barony's controller sign-in action directly instead of a
+    // Space key: KeyboardLogin releases the player's controller (which left
+    // the VR pad unbound in game), GamepadLoginA keeps it.
+    vrAction("GamepadLoginA", lobbyLoginDown);
     if (lobbyLoginDown != lobbyLoginWasDown)
     {
-        vrSendMenuKey(SDLK_SPACE, lobbyLoginDown);
         lobbyLoginWasDown = lobbyLoginDown;
-        printlog("[VR ZF2] lobby join key %s", lobbyLoginDown ? "DOWN" : "UP");
+        printlog("[VR ZF2] lobby join %s", lobbyLoginDown ? "DOWN" : "UP");
     }
 
     if (!menuPresent)
@@ -4218,24 +4248,35 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         }
         return static_cast<Sint32>(t.pulseUntil - tapNow) > 0;
     };
-    g_vrCallOutPulse = stickTap(0, left.thumbstickClick, right.thumbstickClick);
-    g_vrNextInteractPulse = stickTap(1, right.thumbstickClick, left.thumbstickClick);
-    static bool pauseWasDown = false;
-    const bool pauseDown = false; // ZF17: Y is free (wrist panel Menu button pauses)
-    if (pauseDown && !pauseWasDown) g_xrVrMenuPulseUntilMs = tapNow + 125;
-    pauseWasDown = pauseDown;
+    // ZF19: discrete actions are injected into Barony's Input layer by name,
+    // so the game sees "Use", "Cast Spell"... regardless of device type.
+    // Stick clicks: with an interaction in reach either one cycles to the
+    // next interaction; otherwise L3 = Call Out (gesture wheel, keyboard X)
+    // and R3 = ally commands (Show NPC Commands, keyboard C).
+    const bool leftTap = stickTap(0, left.thumbstickClick, right.thumbstickClick);
+    const bool rightTap = stickTap(1, right.thumbstickClick, left.thumbstickClick);
+    g_vrCallOutPulse = g_vrNextInteractPulse = false;
+    if (g_vrPromptVisible)
+        vrAction("Interact Tooltip Next", leftTap || rightTap);
+    else
+    {
+        vrAction("Call Out", leftTap);
+        vrAction("Show NPC Commands", rightTap);
+    }
     (void)bowOwnsRightGrip;
+    vrAction("Use", (right.primaryButton || triggerUseLatched) && !g_vrHandMenuOwnsRight);
+    vrAction("Hotbar Up / Select", static_cast<Sint32>(g_vrHotbarEquipPulseUntil - tapNow) > 0);
+    vrAction("Cast Spell", !bowControls && right.secondaryButton &&
+        !g_vrMeleeExitGripsSuppressed);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_X, false);
-    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_Y,
-        static_cast<Sint32>(g_vrHotbarEquipPulseUntil - tapNow) > 0);
-    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_A,
-        (right.primaryButton || triggerUseLatched) && !g_vrHandMenuOwnsRight);
+    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_Y, false);
+    setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_A, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_B, false);
+    // The physical bow still drives its spell/hotbar gestures through LB.
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
         (bowHotbarSelection ? left.squeeze >= .5f :
             (physicalBowControls ? bowSpellPressed :
-             (bowControls ? (bowInputArmed ? bowDrawControl.squeeze >= .5f : false) :
-              right.secondaryButton))) &&
+             (bowControls ? (bowInputArmed ? bowDrawControl.squeeze >= .5f : false) : false))) &&
         !g_vrMeleeExitGripsSuppressed && !vrWorldGrabOwnsGrip(0) &&
         !(bowControls && g_vrBowDrawHand == 1 &&
           (g_xrVrBackpackInZone || g_xrVrBackpackGripConsumed)));
@@ -5977,6 +6018,11 @@ static void vrTestFakeHandPose(int handIndex, XrTime time, VrControllerHandState
 
 static void vrUpdateControllerInputs(XrTime predictedDisplayTime)
 {
+    // ZF19: rebuild the injected action set every frame (nothing sticks).
+    g_vrActionsNow.clear();
+    g_vrActionsTicks = SDL_GetTicks();
+    g_vrActionHook = &vrActionHook;
+    g_vrActionNamesHook = &vrActionNamesHook;
     if (!g_xrControllerActionsAttached || g_xrSession == XR_NULL_HANDLE ||
         g_xrReferenceSpace == XR_NULL_HANDLE)
     {
@@ -16001,6 +16047,11 @@ static void vrUpdatePromptPanel()
             if (hint)
             {
                 const int hw = static_cast<int>(hint->getWidth()), hh = static_cast<int>(hint->getHeight());
+                // ZF19: stick-click glyphs (either stick cycles interactions).
+                if (Image* l3 = Image::get("*images/ui/Glyphs/Stick_Xbox_L_Pressed_00.png"))
+                    l3->draw(nullptr, SDL_Rect{ box.x + 8, box.y + 60, 24, 24 }, viewport);
+                if (Image* r3 = Image::get("*images/ui/Glyphs/Stick_Xbox_R_Pressed_00.png"))
+                    r3->draw(nullptr, SDL_Rect{ box.x + 36, box.y + 60, 24, 24 }, viewport);
                 hint->draw(SDL_Rect{ 0, 0, hw, hh }, SDL_Rect{ box.x + 72, box.y + 62, hw, hh }, viewport);
             }
         }))

@@ -12,6 +12,12 @@ class GameController;
 
 //! The Input class provides a way to bind physical keys to abstract names like "Move Forward",
 //! collect the input data from the physical devices, and provide it back to you for any purpose.
+// ZF19: device-independent action injection (installed by vr_openxr.cpp).
+// Each Input::update() ORs these into the named bindings ("Use", "Call Out",
+// ...), so VR actions reach Barony exactly like any bound device input.
+extern bool (*g_vrActionHook)(int player, const char* action, float& analog);
+extern const std::vector<std::string>* (*g_vrActionNamesHook)(int player);
+
 class Input {
 public:
 	Input() = default;
