@@ -644,6 +644,18 @@ static bool vrLocalLobbyAwaitingLogin()
     return card && card->findField("start") != nullptr;
 }
 
+// ZF21: this headset's lobby card is signed in (character creation, class,
+// race, "ready"...). Barony drives a signed-in controller card with menu
+// actions only: the mouse/laser no longer reaches it.
+static bool vrLocalLobbyCardJoined()
+{
+    if (!vrCharacterCreationLobbyActive() || clientnum < 0 || clientnum >= MAXPLAYERS)
+        return false;
+    Frame* lobby = MainMenu::main_menu_frame->findFrame("lobby");
+    Frame* card = lobby ? lobby->findFrame((std::string("card") + std::to_string(clientnum)).c_str()) : nullptr;
+    return card && card->findField("start") == nullptr;
+}
+
 
 // STEP 592: Locomotion profiles are independent of the standard SDL gamepad.
 // Keep the saved setting beside Barony's normal working-directory files.
@@ -781,7 +793,11 @@ static std::unordered_map<std::string, float> g_vrActionsNow;
 static Uint32 g_vrActionsTicks = 0; // when the set was rebuilt; stale sets are ignored
 static const std::vector<std::string> g_vrActionNames = {
     "Use", "Cast Spell", "Hotbar Up / Select", "Interact Tooltip Next",
-    "Call Out", "Show NPC Commands", "GamepadLoginA", "Pause Game" };
+    "Call Out", "Show NPC Commands", "GamepadLoginA", "Pause Game",
+    "Attack", "Defend", "Sneak", "MenuConfirm", "MenuCancel" };
+// ZF21: A/X pressed on a menu stay "menu" until released (no attack/defend
+// when the window closes under the finger).
+static bool g_vrPrimaryHeldFromMenu[2] = {};
 // ZF20: B pressed to close a window stays "menu" until released, so the same
 // press cannot cast a spell once the window is gone and shootmode returns.
 static bool g_vrBackHeldFromMenu = false;
@@ -816,6 +832,13 @@ static void vrTestWritePose();
 // ZF8: "view" (default) = hotbar at the bottom of the view; "belt" = v1.0.2 belt.
 static bool g_vrHotbarAtViewBottom = true;
 static bool vrHotbarAtViewBottom() { return g_vrHotbarAtViewBottom; }
+// ZF21: combat=button (default): A = Barony's Attack (hold to charge, release
+// to strike), X = Defend/Sneak, for every weapon. The physical swing and the
+// two-hand bow only exist on the host (a client's attack needs a validated
+// packet), and other players never see the gesture, so they are opt-in.
+static bool g_vrGestureCombat = false;
+static void vrReadFeatureSettings();
+static bool vrGestureCombat() { vrReadFeatureSettings(); return g_vrGestureCombat; }
 static bool g_vrFlailVisualEnabled = true;
 // Cosmetic-only flail pivot and chain tuning in Barony world units.
 static float g_vrFlailAnchorForward = 2.4f;
@@ -850,6 +873,10 @@ static void vrReadFeatureSettings()
             g_vrHotbarAtViewBottom = false;
         else if (std::strncmp(line, "hotbar=view", 11) == 0)
             g_vrHotbarAtViewBottom = true;
+        else if (std::strncmp(line, "combat=gesture", 14) == 0)
+            g_vrGestureCombat = true;
+        else if (std::strncmp(line, "combat=button", 13) == 0)
+            g_vrGestureCombat = false;
         else if (std::strncmp(line, "xr_runtime=", 11) == 0)
         {
             // ZF1: auto | active | steamvr | <path to an OpenXR runtime .json>
@@ -903,7 +930,11 @@ static void vrSaveModeSettings()
             "# hotbar: view (bottom of the view) or belt (v1.0.2 waist belt).\n"
             "hotbar=%s\n"
             "# wrist_ui: look (health/map show when you look at your wrist) or always.\n"
-            "wrist_ui=%s\n",
+            "wrist_ui=%s\n"
+            "# combat: button (A attacks, X defends; works the same for every\n"
+            "# player in multiplayer) or gesture (swing the arm / draw the bow;\n"
+            "# host and single player only).\n"
+            "combat=%s\n",
             g_vrUserEnabled ? 1 : 0, g_vrFlailVisualEnabled ? 1 : 0,
             g_vrFlailAnchorForward, g_vrFlailAnchorUp,
             g_vrFlailChainLength, g_vrFlailAnchorSide, g_vrFlailDamping,
@@ -912,7 +943,8 @@ static void vrSaveModeSettings()
             g_vrRoomScaleEnabled ? 1 : 0,
             g_vrXrRuntimePreference.c_str(),
             g_vrHotbarAtViewBottom ? "view" : "belt",
-            g_vrWristUiOnLook ? "look" : "always");
+            g_vrWristUiOnLook ? "look" : "always",
+            g_vrGestureCombat ? "gesture" : "button");
         std::fclose(file);
         g_vrFlailSettingsDirty = false;
     }
@@ -1311,6 +1343,16 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     // pause menu...); X and Y are free, the wrist panel opens windows.
     const bool menuBackDown = right.secondaryButton;
     if (menuBackDown) g_vrBackHeldFromMenu = true;
+    // ZF21: a signed-in lobby card only listens to menu actions: trigger =
+    // MenuConfirm (A already is, through the VR pad), B = MenuCancel (back /
+    // "not ready"). Escape would leave the lobby, so it is not sent there.
+    // The trigger that signed in must be released before it confirms.
+    const bool cardJoined = vrLocalLobbyCardJoined();
+    static bool lobbyTriggerNeedsRelease = false;
+    if (awaitingLogin && primaryPressed) lobbyTriggerNeedsRelease = true;
+    else if (right.trigger < 0.3f) lobbyTriggerNeedsRelease = false;
+    vrAction("MenuConfirm", cardJoined && right.trigger >= 0.65f && !lobbyTriggerNeedsRelease);
+    vrAction("MenuCancel", cardJoined && menuBackDown);
     // ZF20: in game the VR pad is the player's controller, and Barony only
     // turns Escape into "close windows" for keyboard players (for everybody
     // else it pauses). Inject the native Pause Game action instead: with a
@@ -1320,7 +1362,7 @@ static void vrUpdateMenuNavigation(bool validInput = true)
         clientnum < MAXPLAYERS && players[clientnum] &&
         !players[clientnum]->GUI.isGameoverActive();
     vrAction("Pause Game", inGameWindow && menuBackDown);
-    const bool escapeDown = menuBackDown && !inGameWindow;
+    const bool escapeDown = menuBackDown && !inGameWindow && !cardJoined;
     if (escapeDown != g_xrVrMenuEscapeWasDown)
     {
         vrSendMenuKey(SDLK_ESCAPE, escapeDown);
@@ -1884,7 +1926,7 @@ static bool vrBowDisplaySelected()
 }
 static bool vrBowGameplayActive()
 {
-    return vrBowEquipped() && !g_vrArmCalibrationActive && !intro && !gamePaused &&
+    return vrBowEquipped() && vrGestureCombat() && !g_vrArmCalibrationActive && !intro && !gamePaused &&
         players[clientnum] && players[clientnum]->entity && players[clientnum]->shootmode;
 }
 // GA17: physical bow/spell input yields to the native face hotbar.
@@ -1904,7 +1946,7 @@ static int vrSpellControllerHand()
 // previously held draw on its vanilla automatic-fire path.
 bool vrPhysicalBowOwnsAttack(int playerIndex)
 {
-    return playerIndex == clientnum && vrBowEquipped() &&
+    return playerIndex == clientnum && vrBowEquipped() && vrGestureCombat() &&
         multiplayer != CLIENT && g_xrSession != XR_NULL_HANDLE;
 }
 static void vrUpdateBowPreview();
@@ -3828,7 +3870,9 @@ static void vrUpdateGuiLaserPointer(XrTime predictedDisplayTime)
     // panel margin. Left-click must be a drag, not an artificial short pulse.
     // Right grip is a separate held right-click for context actions.
     // Native controller A/B are disabled in UI to avoid duplicate actions.
-    const bool triggerDown = hand.trigger >= 0.65f ||
+    // ZF21: on a signed-in lobby card the trigger is MenuConfirm (see
+    // vrUpdateMenuNavigation), not a mouse click.
+    const bool triggerDown = (hand.trigger >= 0.65f && !vrLocalLobbyCardJoined()) ||
         (hand.primaryButton && !vrCharacterCreationLobbyActive());
     // STEP 625: The shoulder close gesture must never double as a UI
     // right-click, including on the same frame that a shrine is dismissed.
@@ -4095,6 +4139,8 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     // the existing gamepad + 6DoF combat path below, unchanged.
     if (useInput && vrMenuPointerMode())
     {
+        if (right.primaryButton) g_vrPrimaryHeldFromMenu[1] = true;
+        if (left.primaryButton) g_vrPrimaryHeldFromMenu[0] = true;
         // STEP 624: Restore native Xbox-style focus/confirm ONLY in Barony's
         // character creation lobby. Shrines, inventory, chests and every other
         // pointer-driven UI retain Step623's neutral virtual gamepad behavior.
@@ -4182,16 +4228,17 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     setAxis(g_xrVirtualSDLJoystick, SDL_CONTROLLER_AXIS_RIGHTY, 0);
     // Barony's standard offhand trigger is Sneak *only* when the offhand is
     // empty. Auto-sneak must not raise a shield or cast/use an offhand item.
+    const bool buttonCombat = !vrGestureCombat();
     const float leftSneakTrigger = (useInput && g_xrPhysicalSneaking) ?
-        1.0f : (bowHotbarSelection ? left.trigger :
-        (bowControls ? (bowInputArmed ? bowHoldControl.trigger : 0.f) : left.trigger));
+        1.0f : (buttonCombat ? 0.f : (bowHotbarSelection ? left.trigger :
+        (bowControls ? (bowInputArmed ? bowHoldControl.trigger : 0.f) : left.trigger)));
     setAxis(g_xrVirtualSDLJoystick, SDL_CONTROLLER_AXIS_TRIGGERLEFT,
         triggerAxis((g_vrHotbarOwnsTrigger[0] || g_vrHandMenuOwnsLeft) ? 0.f : leftSneakTrigger));
     // STEP 638DG: Empty-hand punches use the same physical-swing path as
     // melee weapons. Suppress the virtual trigger for BOTH cases so simply
     // holding trigger to charge cannot also create unintended vanilla punches.
     // Non-melee items, UI, and CLIENT mode retain the original trigger path.
-    const bool physicalMeleeOwnsAttack = !intro && !gamePaused &&
+    const bool physicalMeleeOwnsAttack = !buttonCombat && !intro && !gamePaused &&
         multiplayer != CLIENT && clientnum >= 0 && clientnum < MAXPLAYERS &&
         players[clientnum] && players[clientnum]->shootmode &&
         stats[clientnum] &&
@@ -4201,30 +4248,33 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
           (isMeleeWeapon(*stats[clientnum]->weapon) ||
            stats[clientnum]->weapon->type == TOOL_PICKAXE ||
            stats[clientnum]->weapon->type == TOOL_WHIP)));
-    // ZF13: the right trigger is the VR "interact" finger. While Barony shows
-    // an interaction prompt (door, lever, item, NPC...) a trigger pull is a
-    // Use (Xbox A) instead of an attack, latched until the trigger is released.
-    // The hand menu owns the trigger while the ray points at it.
-    static bool triggerUseLatched = false, triggerWasDown = false;
-    const bool triggerDownNow = useInput && right.trigger >= 0.65f;
-    if (triggerDownNow && !triggerWasDown)
-        triggerUseLatched = g_vrPromptVisible && !vrMenuPointerMode() &&
-            !g_vrHandMenuOwnsRight && !g_vrHotbarOwnsTrigger[1] && !bowControls;
-    // ZF20: haptic confirmation of the press: a light tick for Use, a firmer
-    // one when the trigger goes to Barony as an attack (crossbow, staff,
-    // thrown item...). Melee and the physical bow pulse on their own events.
-    if (triggerDownNow && !triggerWasDown)
+    // ZF13/ZF21: the triggers are the VR "interact" fingers. combat=button:
+    // either trigger is Use (doors, levers, items, NPCs...) and never attacks.
+    // combat=gesture: right trigger is Use only while a prompt shows.
+    // The hand menu / hotbar own a trigger while its ray points at them.
+    static bool triggerUseLatched[2] = {}, triggerWasDown[2] = {};
+    for (int h = 0; h < 2; ++h)
     {
-        if (triggerUseLatched) vrHaptic(1, 0.3f, 20);
-        else if (!physicalMeleeOwnsAttack && !bowControls && !vrMenuPointerMode() &&
-            !g_vrHotbarOwnsTrigger[1] && !g_vrHandMenuOwnsRight && !g_xrVrPointerActive)
-            vrHaptic(1, 0.45f, 30);
+        const VrControllerHandState& hand = h ? right : left;
+        const bool down = useInput && hand.trigger >= 0.65f;
+        const bool owned = h ? (g_vrHandMenuOwnsRight || g_vrHotbarOwnsTrigger[1]) :
+            (g_vrHandMenuOwnsLeft || g_vrHotbarOwnsTrigger[0]);
+        if (down && !triggerWasDown[h])
+        {
+            triggerUseLatched[h] = !vrMenuPointerMode() && !owned && !bowControls &&
+                (buttonCombat ? true : (h == 1 && g_vrPromptVisible));
+            if (triggerUseLatched[h]) vrHaptic(h, 0.3f, 20);
+            else if (h == 1 && !buttonCombat && !physicalMeleeOwnsAttack && !bowControls &&
+                !vrMenuPointerMode() && !owned && !g_xrVrPointerActive)
+                vrHaptic(1, 0.45f, 30);
+        }
+        if (hand.trigger < 0.3f) triggerUseLatched[h] = false;
+        triggerWasDown[h] = down;
     }
-    if (right.trigger < 0.3f) triggerUseLatched = false;
-    triggerWasDown = triggerDownNow;
+    const bool triggerUse = triggerUseLatched[0] || triggerUseLatched[1];
     setAxis(g_xrVirtualSDLJoystick, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,
-        (vrMenuPointerMode() || g_xrVrPointerActive ||
-         g_xrVrPointerTriggerConsumed || triggerUseLatched || g_vrHandMenuOwnsRight ||
+        (buttonCombat || vrMenuPointerMode() || g_xrVrPointerActive ||
+         g_xrVrPointerTriggerConsumed || triggerUseLatched[1] || g_vrHandMenuOwnsRight ||
          g_vrHotbarOwnsTrigger[1] ||
          physicalMeleeOwnsAttack || physicalBowControls) ?
         triggerAxis(0.f) : triggerAxis(bowHotbarSelection ? right.trigger :
@@ -4290,7 +4340,27 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
         vrAction("Show NPC Commands", rightTap);
     }
     (void)bowOwnsRightGrip;
-    vrAction("Use", (right.primaryButton || triggerUseLatched) && !g_vrHandMenuOwnsRight);
+    // ZF21 combat=button: A = Attack (hold to charge, release to strike, the
+    // native path, so it works the same for clients and is seen by everyone),
+    // X = Defend / Sneak (Barony shares them like the gamepad left trigger).
+    // A or X still held from a menu click does not attack/defend.
+    if (!right.primaryButton) g_vrPrimaryHeldFromMenu[1] = false;
+    if (!left.primaryButton) g_vrPrimaryHeldFromMenu[0] = false;
+    const bool attackDown = buttonCombat && right.primaryButton && !g_vrPrimaryHeldFromMenu[1] &&
+        !g_vrHandMenuOwnsRight;
+    const bool defendDown = buttonCombat && left.primaryButton && !left.secondaryButton &&
+        !g_vrPrimaryHeldFromMenu[0] && !g_vrHandMenuOwnsLeft;
+    {
+        static bool attackWas = false, defendWas = false;
+        if (attackDown && !attackWas) vrHaptic(1, 0.35f, 20);
+        if (!attackDown && attackWas) vrHaptic(1, 0.6f, 35);
+        attackWas = attackDown;
+        (void)defendWas; // the shield-raised pulse lives in vrUpdateExtraPanels
+    }
+    vrAction("Attack", attackDown);
+    vrAction("Defend", defendDown);
+    vrAction("Sneak", defendDown);
+    vrAction("Use", ((!buttonCombat && right.primaryButton) || triggerUse) && !g_vrHandMenuOwnsRight);
     vrAction("Hotbar Up / Select", static_cast<Sint32>(g_vrHotbarEquipPulseUntil - tapNow) > 0);
     if (!right.secondaryButton) g_vrBackHeldFromMenu = false;
     vrAction("Cast Spell", !bowControls && right.secondaryButton && !g_vrBackHeldFromMenu &&
@@ -13575,6 +13645,28 @@ static void vrProcessPhysicalMelee(XrTime predictedDisplayTime)
         players[clientnum]->shootmode && stats[clientnum] &&
         map.entities && g_xrControllerHands[1].gripPoseValid && !vrWorldGrabOwnsGrip(1);
     vrLoadMeleeTuning();
+    if (!vrGestureCombat())
+    {
+        // ZF21 button combat: Barony's own attack (hold A, release) runs the
+        // charge; mirror its HUD weapon charge on the crosshair cue and pulse
+        // when it starts and when it is full.
+        vrResetMeleeTracking();
+        static int lastCharge = 0;
+        int charge = 0, maxCharge = 1;
+        if (!intro && !gamePaused && clientnum >= 0 && clientnum < MAXPLAYERS &&
+            players[clientnum] && players[clientnum]->shootmode && stats[clientnum] &&
+            players[clientnum]->hud.weapon)
+        {
+            charge = players[clientnum]->hud.weapon->skill[3]; // HUDWEAPON_CHARGE
+            maxCharge = std::max(1, static_cast<int>(Stat::getMaxAttackCharge(stats[clientnum])));
+        }
+        g_vrMeleeChargeVisible = charge > 0;
+        g_vrMeleeChargeFraction = std::min(1.f, static_cast<float>(charge) / maxCharge);
+        if (charge > 0 && lastCharge <= 0) vrHaptic(1, 0.2f, 12);
+        if (charge >= maxCharge && lastCharge < maxCharge) vrHaptic(1, 0.7f, 45);
+        lastCharge = charge;
+        return;
+    }
     if (!validPlayer)
     {
         vrResetMeleeTracking();
