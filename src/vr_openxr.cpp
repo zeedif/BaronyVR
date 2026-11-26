@@ -648,7 +648,10 @@ static void vrBindVirtualControllerInLobby(bool anywhere = false)
 // rebuilt the card, so A never reached the card. Use the keyboard path.
 static bool vrLocalLobbyAwaitingLogin()
 {
-    if (!vrCharacterCreationLobbyActive() || inputstr)
+    // ZF24: not gated on inputstr: the character card's name field can leave it
+    // set after the card is destroyed, which silenced the trigger on the next
+    // visit to the lobby (A still worked through the VR pad).
+    if (!vrCharacterCreationLobbyActive())
         return false;
     Frame* lobby = MainMenu::main_menu_frame->findFrame("lobby");
     if (!lobby) return false;
@@ -1342,6 +1345,23 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     static int testLobbyAFrames = 0;
     static Uint32 testLobbyAWaitSince = 0;
     const bool awaitingLogin = vrLocalLobbyAwaitingLogin();
+    // ZF24: log every change of the VR input context, so a report like "the
+    // trigger stopped working on the join screen" comes with the state.
+    {
+        static int lastContext = -1;
+        const bool lobby = vrCharacterCreationLobbyActive();
+        const int context = intro ? (lobby ? (awaitingLogin ? 1 : (vrLocalLobbyCardJoined() ? 2 : 3)) : 0) :
+            (gamePaused ? 4 : (vrMenuPointerMode() ? 5 : 6));
+        if (context != lastContext)
+        {
+            static const char* names[] = { "title-menus", "lobby-join", "lobby-card", "lobby-other",
+                "paused", "game-window", "gameplay" };
+            printlog("[VR ZF24] context=%s inputstr=%d pad=%d focused=%d actions=%d", names[context],
+                inputstr ? 1 : 0, clientnum >= 0 && clientnum < MAXPLAYERS && inputs.hasController(clientnum) ? 1 : 0,
+                g_xrSessionState == XR_SESSION_STATE_FOCUSED ? 1 : 0, g_xrControllerActionsAttached ? 1 : 0);
+            lastContext = context;
+        }
+    }
     if (testLobbyA && awaitingLogin && !testLobbyAFrames && !lobbyLoginWasDown)
     {
         if (!testLobbyAWaitSince) testLobbyAWaitSince = now;
@@ -4238,9 +4258,9 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
             static bool lobbyAHeldFromLogin = false;
             if (vrLocalLobbyAwaitingLogin()) lobbyAHeldFromLogin = right.primaryButton;
             else if (!right.primaryButton) lobbyAHeldFromLogin = false;
-            SDL_JoystickSetVirtualButton(g_xrVirtualSDLJoystick,
-                SDL_CONTROLLER_BUTTON_A,
-                (right.primaryButton && !lobbyAHeldFromLogin) ? SDL_PRESSED : SDL_RELEASED);
+            // ZF24: A confirms through the same injected action as the
+            // trigger (no virtual pad button), so both always behave alike.
+            vrAction("MenuConfirm", right.primaryButton && !lobbyAHeldFromLogin);
             applyDpad();
             SDL_JoystickUpdate();
             return;
@@ -16058,6 +16078,36 @@ static void vrUpdateHotbarPanel(float dt)
         static_cast<int>(hotbar.h * hs) };
     if (!vrPanelRender(p, [&](GLuint fbo) {
             vrPanelBlitGui(fbo, H, hotbar, hotbarDst);
+            // ZF24: the hotbar crop (it keeps room above for the selected
+            // item's name) also caught dungeon messages drawn there; those
+            // live on their own panel now, so erase them from this copy.
+            if (Frame* chatRoot = players[clientnum]->messageZone.chatFrame)
+                if (Frame* box = chatRoot->findFrame("message box"))
+                {
+                    glEnable(GL_SCISSOR_TEST);
+                    glClearColor(0.f, 0.f, 0.f, 0.f);
+                    for (Field* field : box->getFields())
+                    {
+                        if (!field || field->isDisabled() || field->isInvisible() ||
+                            !field->getText() || !field->getText()[0]) continue;
+                        SDL_Rect r = field->getAbsoluteSize();
+                        if (auto* text = field->getTextObject())
+                        {
+                            const int tw = static_cast<int>(text->getWidth()) + 24;
+                            if (tw > r.w) { r.x -= (tw - r.w) / 2; r.w = tw; }
+                        }
+                        const int x0 = hotbarDst.x + static_cast<int>((r.x - hotbar.x) * hs);
+                        const int y0 = hotbarDst.y + static_cast<int>((r.y - 4 - hotbar.y) * hs);
+                        const int x1 = hotbarDst.x + static_cast<int>((r.x + r.w - hotbar.x) * hs);
+                        const int y1 = hotbarDst.y + static_cast<int>((r.y + r.h + 4 - hotbar.y) * hs);
+                        const int cx0 = std::max(0, x0), cx1 = std::min(W, x1);
+                        const int cy0 = std::max(0, y0), cy1 = std::min(H, y1);
+                        if (cx1 <= cx0 || cy1 <= cy0) continue;
+                        glScissor(cx0, H - cy1, cx1 - cx0, cy1 - cy0);
+                        glClear(GL_COLOR_BUFFER_BIT);
+                    }
+                    glDisable(GL_SCISSOR_TEST);
+                }
             // ZF18: Barony's hand cursor where a controller ray lands (last frame).
             if (g_vrHotbarCursorU >= 0.f)
             {
@@ -16185,6 +16235,9 @@ static void vrUpdateHotbarPanel(float dt)
 // be, so they can be read without looking at a corner.
 static void vrUpdateMessagePanel()
 {
+    // ZF24: the messages are drawn by the mod from Barony's live message
+    // fields (text, font and colour), not cut out of the screen: the old crop
+    // also caught part of the hotbar behind them.
     VrXrPanel& p = g_vrMessagePanel;
     p.visible = false;
     XrVector3f head{};
@@ -16192,14 +16245,45 @@ static void vrUpdateMessagePanel()
     if (!vrHotbarAtViewBottom() || !vrGameplayHudAllowed() || !vrHeadPose(head, headYaw) ||
         !g_vrHotbarPanel.visible)
         return;
-    const SDL_Rect chat = vrSpatialHudRect(2, true);
-    if (chat.w <= 0 || chat.h <= 0) return;
-    constexpr int W = 1024, H = 320;
+    Frame* chat = players[clientnum]->messageZone.chatFrame;
+    Frame* box = chat && !chat->isDisabled() && !chat->isInvisible() ? chat->findFrame("message box") : nullptr;
+    if (!box || box->isDisabled() || box->isInvisible()) return;
+    struct Line { int y; Field* field; };
+    std::vector<Line> lines;
+    for (Field* field : box->getFields())
+    {
+        if (!field || field->isDisabled() || field->isInvisible() || !field->getText() || !field->getText()[0])
+            continue;
+        Uint8 r = 0, g = 0, b = 0, a = 0;
+        getColor(field->getTextColor(), &r, &g, &b, &a);
+        if (!a) continue;
+        lines.push_back({ field->getAbsoluteSize().y, field });
+    }
+    if (lines.empty()) return;
+    std::sort(lines.begin(), lines.end(), [](const Line& x, const Line& y) { return x.y < y.y; });
+    constexpr int W = 1024, H = 320, MaxLines = 6;
+    if (lines.size() > static_cast<size_t>(MaxLines)) lines.erase(lines.begin(), lines.end() - MaxLines);
     if (!vrPanelEnsure(p, W, H, "messages")) return;
-    const float cs = std::min(1.4f, std::min((W - 8.f) / chat.w, (H - 4.f) / chat.h));
-    const SDL_Rect dst{ static_cast<int>(W / 2 - chat.w * cs / 2), static_cast<int>(H - 2 - chat.h * cs),
-        static_cast<int>(chat.w * cs), static_cast<int>(chat.h * cs) };
-    if (!vrPanelRender(p, [&](GLuint fbo) { vrPanelBlitGui(fbo, H, chat, dst); }))
+    if (!vrPanelRender(p, [&](GLuint) {
+            const SDL_Rect viewport{ 0, 0, W, H };
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            int y = H - 4;
+            for (auto it = lines.rbegin(); it != lines.rend(); ++it)
+            {
+                Field* f = it->field;
+                Text* t = Text::get(f->getText(), f->getFont(), f->getTextColor(), f->getOutlineColor());
+                if (!t) continue;
+                const int tw = static_cast<int>(t->getWidth()), th = static_cast<int>(t->getHeight());
+                if (tw <= 0 || th <= 0) continue;
+                const float s = std::min(1.6f, (W - 16.f) / tw);
+                const int dw = static_cast<int>(tw * s), dh = static_cast<int>(th * s);
+                y -= dh + 2;
+                if (y < 0) break;
+                t->draw(SDL_Rect{ 0, 0, tw, th }, SDL_Rect{ (W - dw) / 2, y, dw, dh }, viewport);
+            }
+        }))
         return;
     constexpr float forward = 0.50f, drop = 0.36f, width = 0.62f;
     const float baseY = g_vrHotbarBodyHeight != 0.f ? g_vrHotbarBodyHeight : head.y;
@@ -16502,7 +16586,9 @@ static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye)
     const XrVector3f ax = vrQuatRotate(p.layer.pose.orientation, { 1.f, 0.f, 0.f });
     const XrVector3f ay = vrQuatRotate(p.layer.pose.orientation, { 0.f, 1.f, 0.f });
     const XrVector3f az = vrQuatRotate(p.layer.pose.orientation, { 0.f, 0.f, 1.f });
-    const VrGripBasis3 basis{ vrXrDirToGrip(ax), vrXrDirToGrip(ay), vrXrDirToGrip(az) };
+    // ZF24: texture rows run bottom-up (GL), so the image up axis is the
+    // panel's down axis (it showed upside down in the headset).
+    const VrGripBasis3 basis{ vrXrDirToGrip(ax), vrXrDirToGrip({ -ay.x, -ay.y, -ay.z }), vrXrDirToGrip(az) };
 
     const double bx = marker->x, by = marker->y, bz = marker->z;
     const double yw = marker->yaw, pt = marker->pitch, rl = marker->roll;
