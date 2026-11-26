@@ -16156,7 +16156,7 @@ static void vrUpdateHotbarPanel(float dt)
     bodyYaw = headYaw;
     const XrVector3f viewFwd = vrQuatRotate(g_xrViews[0].pose.orientation, { 0.f, 0.f, -1.f });
     bodyHeight += (head.y - bodyHeight) * std::min(1.f, dt * 0.7f);
-    constexpr float forward = 0.45f, drop = 0.58f, width = 0.62f;
+    constexpr float forward = 0.45f, drop = 0.50f, width = 0.62f;
     const XrVector3f centre{ head.x - sinf(bodyYaw) * forward, bodyHeight - drop,
         head.z - cosf(bodyYaw) * forward };
     bool inView = false;
@@ -16314,7 +16314,7 @@ static void vrUpdateMessagePanel()
             }
         }))
         return;
-    constexpr float forward = 0.50f, drop = 0.36f, width = 0.62f;
+    constexpr float forward = 0.50f, drop = 0.31f, width = 0.62f;
     const float baseY = g_vrHotbarBodyHeight != 0.f ? g_vrHotbarBodyHeight : head.y;
     p.layer.space = g_xrReferenceSpace;
     p.layer.pose.position = { head.x - sinf(headYaw) * forward, baseY - drop, head.z - cosf(headYaw) * forward };
@@ -16816,6 +16816,22 @@ static void vrUpdateExtraPanels()
     vrUpdatePromptPanel();
     vrUpdateWristPanel();
     g_vrHotbarPanelActive = g_vrHotbarPanel.visible;
+    // ZF26: log panel visibility changes and the hotbar crop (diagnosis of
+    // "the hotbar disappears while subtitles show").
+    {
+        static int lastState = -1;
+        static SDL_Rect lastCrop{};
+        const SDL_Rect crop = vrSpatialHudRect(0, false);
+        const int state = (g_vrHotbarPanel.visible ? 1 : 0) | (g_vrMessagePanel.visible ? 2 : 0) |
+            (vrGameplayHudAllowed() ? 4 : 0);
+        if (state != lastState || crop.w != lastCrop.w || crop.h != lastCrop.h)
+        {
+            printlog("[VR ZF26] panels hotbar=%d messages=%d hudAllowed=%d crop=%d,%d %dx%d",
+                state & 1, (state >> 1) & 1, (state >> 2) & 1, crop.x, crop.y, crop.w, crop.h);
+            lastState = state;
+            lastCrop = crop;
+        }
+    }
     g_vrPromptPanelActive = g_vrPromptPanel.visible;
 }
 
