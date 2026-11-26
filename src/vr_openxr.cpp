@@ -1271,9 +1271,9 @@ static void vrUpdateMenuNavigation(bool validInput = true)
         return;
     }
 
-    // ZF16: B is "back" only in the title / lobby menus; in game X and Y
-    // close windows and the pause menu (see the X/Y handler).
-    const bool menuBackDown = right.secondaryButton && intro;
+    // ZF17: B is "back / close" in every menu again (inventory, chests,
+    // pause menu...); X and Y are free, the wrist panel opens windows.
+    const bool menuBackDown = right.secondaryButton;
     if (menuBackDown != g_xrVrMenuEscapeWasDown)
     {
         vrSendMenuKey(SDLK_ESCAPE, menuBackDown);
@@ -4215,7 +4215,7 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     g_vrCallOutPulse = stickTap(0, left.thumbstickClick, right.thumbstickClick);
     g_vrNextInteractPulse = stickTap(1, right.thumbstickClick, left.thumbstickClick);
     static bool pauseWasDown = false;
-    const bool pauseDown = useInput && left.secondaryButton && !armCalChord;
+    const bool pauseDown = false; // ZF17: Y is free (wrist panel Menu button pauses)
     if (pauseDown && !pauseWasDown) g_xrVrMenuPulseUntilMs = tapNow + 125;
     pauseWasDown = pauseDown;
     (void)bowOwnsRightGrip;
@@ -4235,8 +4235,7 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
           (g_xrVrBackpackInZone || g_xrVrBackpackGripConsumed)));
     // RB is Barony's Quick Turn: that lives on right-stick down (below).
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, false);
-    const bool characterButton = left.primaryButton && !armCalChord && !inGameInventory &&
-        !g_vrHandMenuOwnsLeft;
+    const bool characterButton = false; // ZF17: X is free (wrist panel opens the inventory)
     // STEP638GA3: Push the RIGHT analog stick DOWN for vanilla Quick Turn.
     // OpenXR thumbstick Y is negative when down. The right stick's normal
     // Y/look axis stays zero (headset owns pitch), and right-stick CLICK is
@@ -6174,46 +6173,8 @@ static void vrUpdateControllerInputs(XrTime predictedDisplayTime)
         !g_xrControllerHands[0].secondaryButton;
     const bool uiYDown = g_xrControllerHands[0].secondaryButton &&
         !g_xrControllerHands[0].primaryButton;
-    // ZF16: X / Y own the in-game windows (B is no longer "close"):
-    //   gameplay        X opens inventory, Y opens the pause menu (gamepad map)
-    //   inventory       X closes, Y opens spells; in spells X or Y closes
-    //   other windows   (chest, shop, workstation, map, log...) X or Y closes
-    //   pause menu      Y returns to the game (Escape: also "back" in submenus)
-    const bool inGameSession = !g_vrArmCalibrationActive &&
-        g_xrSessionState == XR_SESSION_STATE_FOCUSED && !intro &&
-        clientnum >= 0 && clientnum < MAXPLAYERS && players[clientnum] &&
-        !players[clientnum]->usingCommand();
-    const bool xPressed = uiXDown && !g_xrVrUiXWasDown;
-    const bool yPressed = uiYDown && !g_xrVrUiYWasDown;
-    if (inGameSession && gamePaused)
-    {
-        if (yPressed)
-        {
-            vrSendMenuKey(SDLK_ESCAPE, true);
-            vrSendMenuKey(SDLK_ESCAPE, false);
-            printlog("[VR ZF16] Y -> back / resume");
-        }
-    }
-    else if (inGameSession && !players[clientnum]->shootmode && (xPressed || yPressed))
-    {
-        Player* p = players[clientnum];
-        const bool inventory = p->gui_mode == GUI_MODE_INVENTORY &&
-            !p->inventoryUI.chestGUI.bOpen && !p->shopGUI.bOpen &&
-            !GenericGUI[clientnum].isGUIOpen() && !p->minimap.mapWindow &&
-            !p->messageZone.logWindow;
-        const bool spells = p->GUI.activeModule == Player::GUI_t::MODULE_SPELLS;
-        if (yPressed && inventory && !spells)
-        {
-            p->openStatusScreen(GUI_MODE_INVENTORY, INVENTORY_MODE_SPELL,
-                Player::GUI_t::MODULE_SPELLS);
-            printlog("[VR ZF16] Y -> spells");
-        }
-        else
-        {
-            p->closeAllGUIs(CLOSEGUI_ENABLE_SHOOTMODE, CLOSEGUI_CLOSE_ALL);
-            printlog("[VR ZF16] %c -> close windows", xPressed ? 'X' : 'Y');
-        }
-    }
+    // ZF17: X and Y are free in game; B closes windows (menu navigation).
+    (void)uiXDown; (void)uiYDown;
     g_xrVrUiXWasDown = uiXDown;
     g_xrVrUiYWasDown = uiYDown;
 
