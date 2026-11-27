@@ -848,6 +848,7 @@ static bool vrPanelRayUV(const VrXrPanel& p, const XrPosef& aim, float& u, float
 static void vrHaptic(int hand, float amplitude, int ms = 15);
 static void vrUpdateExtraPanels();
 static void vrLobbyPointerFocus(bool cardJoined);
+static bool g_vrLobbyPointerHover = false; // ZF28: set by vrLobbyPointerFocus
 static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye);
 static uint32_t vrAppendExtraLayers(const XrCompositionLayerBaseHeader** layers,
     uint32_t count, uint32_t maxCount);
@@ -1424,8 +1425,25 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     static bool lobbyTriggerNeedsRelease = false;
     if (awaitingLogin && primaryPressed) lobbyTriggerNeedsRelease = true;
     else if (right.trigger < 0.3f) lobbyTriggerNeedsRelease = false;
-    vrAction("MenuConfirm", cardJoined && right.trigger >= 0.65f && !lobbyTriggerNeedsRelease);
-    vrAction("MenuCancel", cardJoined && menuBackDown);
+    // ZF28: the trigger confirms only what the ray points at (Barony moves the
+    // focus by itself, e.g. onto the lobby-code buttons after "ready").
+    static bool triggerConfirmLatched = false;
+    if (right.trigger < 0.3f) triggerConfirmLatched = false;
+    else if (right.trigger >= 0.65f && !triggerConfirmLatched)
+        triggerConfirmLatched = cardJoined && !lobbyTriggerNeedsRelease && g_vrLobbyPointerHover;
+    vrAction("MenuConfirm", cardJoined && triggerConfirmLatched);
+    // ZF28: a text field left in edit mode (inputstr) blocks every menu input
+    // in Barony; B ends the edit (Return keeps the text) instead.
+    static bool backWas = false;
+    const bool textEditing = cardJoined && inputstr != nullptr;
+    if (textEditing && menuBackDown && !backWas)
+    {
+        vrSendMenuKey(SDLK_RETURN, true);
+        vrSendMenuKey(SDLK_RETURN, false);
+        printlog("[VR ZF28] B ended a text edit in the lobby");
+    }
+    backWas = menuBackDown;
+    vrAction("MenuCancel", cardJoined && menuBackDown && !textEditing);
     // ZF20: in game the VR pad is the player's controller, and Barony only
     // turns Escape into "close windows" for keyboard players (for everybody
     // else it pauses). Inject the native Pause Game action instead: with a
@@ -1535,14 +1553,18 @@ static int g_xrVrLastWarpY = 0;
 static bool g_xrVrPointerSwitchWasDown = false;
 static bool g_xrVrPointerRayHit = false;
 
-// ZF23: Barony drives a signed-in controller card in the lobby with focus +
-// confirm only, so the laser could not pick ATRAS, the name, gender, race,
-// class or the dice. When the ray moves onto one of this card's widgets, give
-// it the controller focus; the trigger / A then confirm what is pointed at.
-// The stick still moves the focus as on a gamepad.
+// ZF23/ZF28: Barony drives a signed-in controller card in the lobby with
+// focus + confirm only, so the laser could not pick anything there. When the
+// ray moves onto a widget of the lobby (this player's card, the top-left
+// ATRAS, the lobby code buttons...) it gets the controller focus; the trigger
+// then confirms what is pointed at (and only then), A confirms the focus as on
+// a gamepad, and the stick still moves the focus. Other players' cards and
+// text fields are skipped: activating the name field starts text entry, and
+// with no keyboard every menu input stays blocked until it ends.
 static void vrLobbyPointerFocus(bool cardJoined)
 {
     static Widget* lastHover = nullptr;
+    g_vrLobbyPointerHover = false;
     if (!cardJoined || !g_xrVrPointerActive || !g_xrVrPointerRayHit ||
         Frame::virtualScreenX <= 0 || Frame::virtualScreenY <= 0)
     {
@@ -1550,8 +1572,8 @@ static void vrLobbyPointerFocus(bool cardJoined)
         return;
     }
     Frame* lobby = MainMenu::main_menu_frame ? MainMenu::main_menu_frame->findFrame("lobby") : nullptr;
-    Frame* card = lobby ? lobby->findFrame((std::string("card") + std::to_string(clientnum)).c_str()) : nullptr;
-    if (!card) { lastHover = nullptr; return; }
+    if (!lobby) { lastHover = nullptr; return; }
+    const std::string ownCard = std::string("card") + std::to_string(clientnum);
     const int px = g_xrVrPointerGuiX * Frame::virtualScreenX / 1280;
     const int py = g_xrVrPointerGuiY * Frame::virtualScreenY / 720;
     Widget* best = nullptr;
@@ -1563,15 +1585,17 @@ static void vrLobbyPointerFocus(bool cardJoined)
     };
     std::function<void(Frame*)> walk = [&](Frame* f) {
         if (!f || f->isDisabled() || f->isInvisible()) return;
+        const char* name = f->getName();
+        if (name && std::strncmp(name, "card", 4) == 0 && ownCard != name) return;
         for (Button* b : f->getButtons()) if (!b->isInvisible()) consider(b, b->getAbsoluteSize());
-        for (Field* fl : f->getFields()) if (!fl->isInvisible() && fl->isEditable()) consider(fl, fl->getAbsoluteSize());
         for (Slider* s : f->getSliders()) if (!s->isInvisible()) consider(s, s->getAbsoluteSize());
         for (Frame* child : f->getFrames()) walk(child);
     };
-    walk(card);
+    walk(lobby);
     if (best && best != lastHover && !best->isSelected())
         best->select();
     lastHover = best;
+    g_vrLobbyPointerHover = best != nullptr;
 }
 
 // STEP 623: The native inventory, buttons and Assist Shrine consult
@@ -4536,7 +4560,10 @@ static void vrUpdateVirtualSDLGamepad(bool inputsValid = true)
     // Keep physical stick-click reserved for menu chords/calibration.
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_RIGHTSTICK, false);
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_START,
-        left.menuButton || (useInput && vrShortcutPulseActive(g_xrVrMenuPulseUntilMs)));
+        // ZF28: not the left menu button: on Quest controllers under SteamVR it
+        // opens the SteamVR dashboard, which takes the input focus away (no
+        // movement) while also pausing the game. Pause: wrist MENU or both sticks.
+        useInput && vrShortcutPulseActive(g_xrVrMenuPulseUntilMs));
     setButton(g_xrVirtualSDLJoystick, SDL_CONTROLLER_BUTTON_BACK,
         (useInput && vrShortcutPulseActive(g_xrVrBackpackPulseUntilMs)) || characterButton);
 
@@ -5996,6 +6023,20 @@ void vrPollOpenXREvents()
                 {
                     printlog("OpenXR S8D: session state event=%d.",
                         static_cast<int>(stateEvent->state));
+                }
+                {
+                    // ZF28: record session state changes; a session that drops
+                    // to VISIBLE in game has lost the input focus to SteamVR
+                    // (its dashboard), so tell the player why nothing moves.
+                    static const char* stateNames[] = { "UNKNOWN", "IDLE", "READY", "SYNCHRONIZED",
+                        "VISIBLE", "FOCUSED", "STOPPING", "LOSS_PENDING", "EXITING" };
+                    const int st = static_cast<int>(stateEvent->state);
+                    printlog("[VR ZF28] session state %s", st >= 0 && st <= 8 ? stateNames[st] : "?");
+                    if (stateEvent->state == XR_SESSION_STATE_VISIBLE &&
+                        g_xrSessionState == XR_SESSION_STATE_FOCUSED && !intro &&
+                        clientnum >= 0 && clientnum < MAXPLAYERS && players[clientnum])
+                        messagePlayer(clientnum, MESSAGE_HINT,
+                            "VR: SteamVR tiene el control (su menu esta abierto). Cierralo con el boton del menu izquierdo para volver a moverte.");
                 }
                 g_xrSessionState = stateEvent->state;
                 if (g_xrSessionState != XR_SESSION_STATE_FOCUSED)

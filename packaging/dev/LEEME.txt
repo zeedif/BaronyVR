@@ -26,6 +26,8 @@ CONTROLES EN PARTIDA (mandos Quest, ambidiestro)
   Stick izquierdo ...... Moverse
   Stick der. izq/der ... Girar     Stick der. abajo ... Giro rapido 180
   Pulsar ambos sticks .. Menu de pausa (mantener 1,5 s: cambiar modo de juego)
+  Boton menu izquierdo . Es de SteamVR (abre su panel y el juego deja de recibir
+                         los mandos hasta cerrarlo). Ya no pausa el juego.
   Los grips siguen sirviendo para agarrar, beber y mochila.
   (combat=gesture en vr_settings.cfg recupera el golpe moviendo el brazo y el
    arco con las dos manos; solo funciona si eres el anfitrion o juegas solo.)
@@ -37,7 +39,8 @@ CON VENTANAS ABIERTAS (inventario, hechizos, cofre, tienda, altar, mapa, pausa..
 MENUS DE INICIO Y LOBBY
   Gatillo derecho o A .. Pulsar botones, unirse a la partida.
   En tu tarjeta del lobby (personaje, clase, "Todo a punto"): Barony la maneja
-  como un mando: apunta con el rayo a una opcion para seleccionarla (o usa el
+  como un mando: apunta con el rayo a una opcion (o a ATRAS) para seleccionarla
+  y pulsa el gatillo (sin apuntar a nada, el gatillo no hace nada). O usa el
   stick izquierdo),
   gatillo derecho o A = aceptar, B o Y = atras / quitar "Todo a punto".
 
