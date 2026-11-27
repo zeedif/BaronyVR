@@ -869,6 +869,7 @@ static bool g_vrThumbrestDpad = false; // ZF25: thumbrest_dpad=1 enables the GA2
 // ZF23: wrist_render=world (default, drawn inside each eye image) or layer
 // (OpenXR quad layer, as before).
 static bool g_vrWristRenderWorld = true;
+static bool g_vrPanelsWorld = true; // ZF31: panel_render=world (default) | layer
 static void vrReadFeatureSettings();
 static bool vrGestureCombat() { vrReadFeatureSettings(); return g_vrGestureCombat; }
 static bool g_vrFlailVisualEnabled = true;
@@ -911,6 +912,10 @@ static void vrReadFeatureSettings()
             g_vrThumbrestDpad = true;
         else if (std::strncmp(line, "thumbrest_dpad=0", 16) == 0)
             g_vrThumbrestDpad = false;
+        else if (std::strncmp(line, "panel_render=layer", 18) == 0)
+            g_vrPanelsWorld = false;
+        else if (std::strncmp(line, "panel_render=world", 18) == 0)
+            g_vrPanelsWorld = true;
         else if (std::strncmp(line, "wrist_render=layer", 18) == 0)
             g_vrWristRenderWorld = false;
         else if (std::strncmp(line, "wrist_render=world", 18) == 0)
@@ -981,7 +986,10 @@ static void vrSaveModeSettings()
             "wrist_render=%s\n"
             "# thumbrest_dpad: 1 = resting the right thumb on the thumbrest turns the\n"
             "# left stick into a D-pad (no walking); 0 = off.\n"
-            "thumbrest_dpad=%d\n",
+            "thumbrest_dpad=%d\n"
+            "# panel_render: world (hotbar, subtitles, prompts drawn in the 3D image)\n"
+            "# or layer (compositor overlays).\n"
+            "panel_render=%s\n",
             g_vrUserEnabled ? 1 : 0, g_vrFlailVisualEnabled ? 1 : 0,
             g_vrFlailAnchorForward, g_vrFlailAnchorUp,
             g_vrFlailChainLength, g_vrFlailAnchorSide, g_vrFlailDamping,
@@ -994,7 +1002,8 @@ static void vrSaveModeSettings()
             g_vrGestureCombat ? "gesture" : "button",
             static_cast<double>(vrDebugDumpIntervalSeconds()),
             g_vrWristRenderWorld ? "world" : "layer",
-            g_vrThumbrestDpad ? 1 : 0);
+            g_vrThumbrestDpad ? 1 : 0,
+            g_vrPanelsWorld ? "world" : "layer");
         std::fclose(file);
         g_vrFlailSettingsDirty = false;
     }
@@ -5195,6 +5204,18 @@ static bool vrOpenXRTestOnce()
         std::printf("OpenXR: xrCreateInstance failed (%d)\n",
             static_cast<int>(result));
         return false;
+    }
+    {
+        // ZF31: record which OpenXR runtime runs the game (SteamVR, Meta
+        // Quest Link, Virtual Desktop...): quad layers behave differently.
+        vrReadFeatureSettings();
+        XrInstanceProperties props{ XR_TYPE_INSTANCE_PROPERTIES };
+        if (XR_SUCCEEDED(xrGetInstanceProperties(instance, &props)))
+            printlog("[VR ZF31] OpenXR runtime: %s %u.%u.%u", props.runtimeName,
+                XR_VERSION_MAJOR(props.runtimeVersion), XR_VERSION_MINOR(props.runtimeVersion),
+                XR_VERSION_PATCH(props.runtimeVersion));
+        printlog("[VR ZF31] panels drawn %s", g_vrPanelsWorld ? "in the eye images (panel_render=world)" :
+            "as compositor layers (panel_render=layer)");
     }
     // Create the action set for Quest 3 controller inputs.
 // This will later contain buttons, thumbsticks,
@@ -15960,14 +15981,29 @@ struct VrXrPanel
     // ZF27: the layer is always submitted once the panel exists; while hidden
     // it shows a transparent image (clearShown) instead of leaving the list.
     bool released = false, clearShown = false;
+    // ZF31: panel_render=world draws the panel inside each eye image from its
+    // own texture instead of submitting a compositor quad layer.
+    bool world = false;
+    GLuint worldTex = 0, worldFbo = 0;
     const char* name = "";
 };
 static VrXrPanel g_vrHotbarPanel, g_vrPromptPanel, g_vrHandMenuPanel, g_vrMessagePanel;
 static float g_vrHotbarBodyHeight = 0.f;
 
+// (g_vrPanelsWorld: see the settings block near the top)
 static bool vrPanelEnsure(VrXrPanel& p, int width, int height, const char* name)
 {
-    if (p.swapchain != XR_NULL_HANDLE) return true;
+    if (p.swapchain != XR_NULL_HANDLE || p.world) return true;
+    if (g_vrPanelsWorld)
+    {
+        p.world = true;
+        p.width = width; p.height = height; p.name = name;
+        p.layer.space = g_xrReferenceSpace;
+        p.layer.pose.orientation.w = 1.f;
+        p.layer.size = { 0.01f, 0.01f };
+        printlog("[VR ZF31] %s panel ready (%dx%d, drawn in the eye images)", name, width, height);
+        return true;
+    }
     if (p.failed || g_xrSession == XR_NULL_HANDLE || g_xrReferenceSpace == XR_NULL_HANDLE)
         return false;
     XrSwapchainCreateInfo info{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
@@ -16012,8 +16048,16 @@ static bool vrPanelEnsure(VrXrPanel& p, int width, int height, const char* name)
 // Acquire an image, clear it to transparent and let draw() fill it with the
 // panel framebuffer bound for drawing (top-left-origin viewport).
 template <typename DrawFn>
+static bool vrOffscreenRender(GLuint& tex, GLuint& fbo, int w, int h, const char* name, DrawFn&& draw);
+template <typename DrawFn>
 static bool vrPanelRender(VrXrPanel& p, DrawFn&& draw)
 {
+    if (p.world)
+    {
+        const bool done = vrOffscreenRender(p.worldTex, p.worldFbo, p.width, p.height, p.name, draw);
+        if (done) p.released = true;
+        return done;
+    }
     uint32_t index = 0;
     XrSwapchainImageAcquireInfo acquire{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
     if (XR_FAILED(xrAcquireSwapchainImage(p.swapchain, &acquire, &index)))
@@ -16671,14 +16715,16 @@ static VrGripVector3 vrXrDirToGrip(const XrVector3f& v)
     return { ahead * c - right * s, v.y, ahead * s + right * c };
 }
 
-static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye)
+// ZF23/ZF31: draw a panel texture inside one eye image, at the panel's
+// OpenXR pose, on top of the scene (like a compositor layer, but with no
+// dependence on how the runtime composites quads).
+static void vrDrawPanelTexInEye(view_t* eyeCamera, int eye, const VrXrPanel& p, GLuint tex)
 {
-    if (!eyeCamera || !g_vrWristWorldVisible || !g_vrWristTex || !g_xrEyeViewsValid ||
+    if (!eyeCamera || !tex || p.width <= 0 || !g_xrEyeViewsValid ||
         clientnum < 0 || clientnum >= MAXPLAYERS || !players[clientnum])
         return;
     Entity* marker = players[clientnum]->hud.weapon;
     if (!marker) return;
-    const VrXrPanel& p = g_vrHandMenuPanel;
     const XrVector3f& e = g_xrViews[eye ? 1 : 0].pose.position;
     const XrVector3f& c = p.layer.pose.position;
     const float upm = VR_TRACKING_UNITS_PER_METER / std::max(0.1f, g_vrS12FrameWorldSize);
@@ -16705,11 +16751,11 @@ static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye)
     marker->focalx = marker->focaly = marker->focalz = 0.0;
     marker->flags[OVERDRAW] = false;
     marker->flags[INVISIBLE] = false;
-    // On top of the hands and the held shield, like the old compositor layer.
+    // On top of the hands and the held shield, like a compositor layer.
     const GLboolean depth = glIsEnabled(GL_DEPTH_TEST), cull = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    glDrawVrUiTexture(eyeCamera, marker, g_vrWristTex, p.width, p.height);
+    glDrawVrUiTexture(eyeCamera, marker, tex, p.width, p.height);
     if (depth) glEnable(GL_DEPTH_TEST);
     if (cull) glEnable(GL_CULL_FACE);
     marker->x = bx; marker->y = by; marker->z = bz;
@@ -16718,6 +16764,16 @@ static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye)
     marker->focalx = fx; marker->focaly = fy; marker->focalz = fz;
     marker->flags[OVERDRAW] = oldOverdraw;
     marker->flags[INVISIBLE] = oldInvisible;
+}
+
+static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye)
+{
+    // ZF31: every world-mode panel, back to front; the wrist panel last.
+    for (const VrXrPanel* panel : { &g_vrMessagePanel, &g_vrHotbarPanel, &g_vrPromptPanel })
+        if (panel->world && panel->visible && panel->worldTex)
+            vrDrawPanelTexInEye(eyeCamera, eye, *panel, panel->worldTex);
+    if (g_vrWristWorldVisible)
+        vrDrawPanelTexInEye(eyeCamera, eye, g_vrHandMenuPanel, g_vrWristTex);
 }
 
 // ZF16: ONE wrist panel on the hand that made the watch gesture: effects,
