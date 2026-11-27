@@ -40,7 +40,8 @@ MENUS DE INICIO Y LOBBY
   Gatillo derecho o A .. Pulsar botones, unirse a la partida.
   En tu tarjeta del lobby (personaje, clase, "Todo a punto"): Barony la maneja
   como un mando: apunta con el rayo a una opcion (o a ATRAS) para seleccionarla
-  y pulsa el gatillo (sin apuntar a nada, el gatillo no hace nada). O usa el
+  y pulsa el gatillo (sin apuntar a nada, el gatillo no hace nada). Si activas
+  el campo NOMBRE, la edicion termina con B o al apuntar a otro elemento. O usa el
   stick izquierdo),
   gatillo derecho o A = aceptar, B o Y = atras / quitar "Todo a punto".
 

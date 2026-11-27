@@ -849,6 +849,9 @@ static void vrHaptic(int hand, float amplitude, int ms = 15);
 static void vrUpdateExtraPanels();
 static void vrLobbyPointerFocus(bool cardJoined);
 static bool g_vrLobbyPointerHover = false; // ZF28: set by vrLobbyPointerFocus
+class Field;
+static Field* g_vrLobbyEditingField = nullptr;
+static void vrLobbyEndTextEdit();
 static void vrDrawWristPanelInEye(view_t* eyeCamera, int eye);
 static uint32_t vrAppendExtraLayers(const XrCompositionLayerBaseHeader** layers,
     uint32_t count, uint32_t maxCount);
@@ -1434,16 +1437,20 @@ static void vrUpdateMenuNavigation(bool validInput = true)
     vrAction("MenuConfirm", cardJoined && triggerConfirmLatched);
     // ZF28: a text field left in edit mode (inputstr) blocks every menu input
     // in Barony; B ends the edit (Return keeps the text) instead.
-    static bool backWas = false;
+    static bool backWas = false, backEndedEdit = false;
     const bool textEditing = cardJoined && inputstr != nullptr;
     if (textEditing && menuBackDown && !backWas)
     {
-        vrSendMenuKey(SDLK_RETURN, true);
-        vrSendMenuKey(SDLK_RETURN, false);
+        // ZF30: end the edit directly (keeps the text); the same B press must
+        // not also go "back" once the field is closed.
+        if (g_vrLobbyEditingField) vrLobbyEndTextEdit();
+        else { vrSendMenuKey(SDLK_RETURN, true); vrSendMenuKey(SDLK_RETURN, false); }
+        backEndedEdit = true;
         printlog("[VR ZF28] B ended a text edit in the lobby");
     }
+    if (!menuBackDown) backEndedEdit = false;
     backWas = menuBackDown;
-    vrAction("MenuCancel", cardJoined && menuBackDown && !textEditing);
+    vrAction("MenuCancel", cardJoined && menuBackDown && !textEditing && !backEndedEdit);
     // ZF20: in game the VR pad is the player's controller, and Barony only
     // turns Escape into "close windows" for keyboard players (for everybody
     // else it pauses). Inject the native Pause Game action instead: with a
@@ -1553,33 +1560,39 @@ static int g_xrVrLastWarpY = 0;
 static bool g_xrVrPointerSwitchWasDown = false;
 static bool g_xrVrPointerRayHit = false;
 
-// ZF23/ZF28: Barony drives a signed-in controller card in the lobby with
+// ZF23/ZF28/ZF30: Barony drives a signed-in controller card in the lobby with
 // focus + confirm only, so the laser could not pick anything there. When the
-// ray moves onto a widget of the lobby (this player's card, the top-left
-// ATRAS, the lobby code buttons...) it gets the controller focus; the trigger
-// then confirms what is pointed at (and only then), A confirms the focus as on
-// a gamepad, and the stick still moves the focus. Other players' cards and
-// text fields are skipped: activating the name field starts text entry, and
-// with no keyboard every menu input stays blocked until it ends.
+// ray moves onto a widget of the lobby (this player's card, its name field,
+// the top-left ATRAS, the lobby code buttons...) it gets the controller focus;
+// the trigger then confirms what is pointed at (and only then), A confirms the
+// focus as on a gamepad, and the stick still moves the focus. Other players'
+// cards are skipped. A field in text-edit mode blocks every widget input in
+// Barony, so pointing at any other widget ends that edit (B ends it too).
+// (g_vrLobbyEditingField declared near the top)
+static void vrLobbyEndTextEdit()
+{
+    if (g_vrLobbyEditingField && g_vrLobbyEditingField->isActivated())
+    {
+        g_vrLobbyEditingField->deactivate();
+        printlog("[VR ZF30] lobby text edit ended");
+    }
+    g_vrLobbyEditingField = nullptr;
+}
 static void vrLobbyPointerFocus(bool cardJoined)
 {
     static Widget* lastHover = nullptr;
     g_vrLobbyPointerHover = false;
-    if (!cardJoined || !g_xrVrPointerActive || !g_xrVrPointerRayHit ||
-        Frame::virtualScreenX <= 0 || Frame::virtualScreenY <= 0)
-    {
-        lastHover = nullptr;
-        return;
-    }
-    Frame* lobby = MainMenu::main_menu_frame ? MainMenu::main_menu_frame->findFrame("lobby") : nullptr;
-    if (!lobby) { lastHover = nullptr; return; }
+    Frame* lobby = cardJoined && MainMenu::main_menu_frame ? MainMenu::main_menu_frame->findFrame("lobby") : nullptr;
     const std::string ownCard = std::string("card") + std::to_string(clientnum);
-    const int px = g_xrVrPointerGuiX * Frame::virtualScreenX / 1280;
-    const int py = g_xrVrPointerGuiY * Frame::virtualScreenY / 720;
     Widget* best = nullptr;
     long bestArea = 0;
+    g_vrLobbyEditingField = nullptr;
+    const bool pointing = lobby && g_xrVrPointerActive && g_xrVrPointerRayHit &&
+        Frame::virtualScreenX > 0 && Frame::virtualScreenY > 0;
+    const int px = pointing ? g_xrVrPointerGuiX * Frame::virtualScreenX / 1280 : -1;
+    const int py = pointing ? g_xrVrPointerGuiY * Frame::virtualScreenY / 720 : -1;
     auto consider = [&](Widget* w, const SDL_Rect& r) {
-        if (!w || w->isDisabled() || px < r.x || py < r.y || px >= r.x + r.w || py >= r.y + r.h) return;
+        if (!pointing || !w || w->isDisabled() || px < r.x || py < r.y || px >= r.x + r.w || py >= r.y + r.h) return;
         const long area = static_cast<long>(r.w) * r.h;
         if (!best || area < bestArea) { best = w; bestArea = area; }
     };
@@ -1588,12 +1601,22 @@ static void vrLobbyPointerFocus(bool cardJoined)
         const char* name = f->getName();
         if (name && std::strncmp(name, "card", 4) == 0 && ownCard != name) return;
         for (Button* b : f->getButtons()) if (!b->isInvisible()) consider(b, b->getAbsoluteSize());
+        for (Field* fl : f->getFields())
+        {
+            if (fl->isInvisible() || !fl->isEditable()) continue;
+            if (fl->isActivated()) g_vrLobbyEditingField = fl;
+            consider(fl, fl->getAbsoluteSize());
+        }
         for (Slider* s : f->getSliders()) if (!s->isInvisible()) consider(s, s->getAbsoluteSize());
         for (Frame* child : f->getFrames()) walk(child);
     };
-    walk(lobby);
-    if (best && best != lastHover && !best->isSelected())
-        best->select();
+    if (lobby) walk(lobby);
+    if (!pointing) { lastHover = nullptr; return; }
+    if (best && best != lastHover)
+    {
+        if (g_vrLobbyEditingField && best != g_vrLobbyEditingField) vrLobbyEndTextEdit();
+        if (!best->isSelected()) best->select();
+    }
     lastHover = best;
     g_vrLobbyPointerHover = best != nullptr;
 }
